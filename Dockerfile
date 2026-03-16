@@ -8,13 +8,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt upgrade -y
 RUN apt install libopenblas-dev gfortran libboost-all-dev libtbb-dev -y
 
-# sciaganie scipy i podmienianie plikow z modulu cluster
+# Patch SciPy cluster module to accept int16 distance matrices
 WORKDIR /opt
 RUN git clone https://github.com/scipy/scipy.git --tags
 WORKDIR /opt/scipy
 RUN git checkout 476428deacecf289cc1b39da8b1edb9d81e2facc
-COPY cluster/hierarchy.py /opt/scipy/scipy/cluster/hierarchy.py
-COPY cluster/_hierarchy.pyx /opt/scipy/scipy/cluster/_hierarchy.pyx
+COPY scipy_patches/hierarchy.py /opt/scipy/scipy/cluster/hierarchy.py
+COPY scipy_patches/_hierarchy.pyx /opt/scipy/scipy/cluster/_hierarchy.pyx
 
 RUN git submodule update --init
 RUN python -m pip install -r requirements/all.txt
@@ -33,7 +33,7 @@ RUN cp -r build-install/lib/python3.11/site-packages/scipy/ /usr/local/lib/pytho
 
 RUN pip install pandas numba tbb
 RUN pip install --no-deps pHierCC
-COPY getDistance_github.py /usr/local/lib/python3.11/site-packages/pHierCC/getDistance.py
-COPY pHierCC_github.py /usr/local/lib/python3.11/site-packages/pHierCC/pHierCC.py
+COPY src/getDistance.py /usr/local/lib/python3.11/site-packages/pHierCC/getDistance.py
+COPY src/pHierCC.py /usr/local/lib/python3.11/site-packages/pHierCC/pHierCC.py
 ENTRYPOINT ["pHierCC"]
 
