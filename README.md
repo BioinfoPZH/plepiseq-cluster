@@ -82,8 +82,6 @@ Output files (`dist0.npy`, `dist1.npy`, `ordering.npy`, `profile_single_linkage.
 | `-n`, `--n_proc` | Number of threads for Numba parallel distance computation | 4 |
 | `--clustering_method` | Linkage criterion (`single` / `complete`). Can be specified multiple times to run both in one invocation. | `single` |
 | `-m`, `--allowed_missing` | Allowed proportion of missing genes in pairwise comparisons | 0.05 |
-| `-a`, `--profile_distance0` | Pre-computed condensed distance matrix (`.npy`) | *auto-detected* |
-| `-b`, `--profile_distance1` | Pre-computed full distance matrix (`.npy`) | *auto-detected* |
 | `--clean` | Force full recalculation, removing cached distance matrices | `false` |
 
 ### Full mode (first run)

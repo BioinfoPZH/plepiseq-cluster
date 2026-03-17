@@ -134,12 +134,6 @@ def _split_local(rows, row_names):
                                       'table of columns of the ST numbers and the allelic numbers, '
                                       'separated by tabs. Can be GZIPped.',
               required=True, type=click.Path())
-@click.option('-a', '--profile_distance0', help='[INPUT; optional] The .npy output of a'
-                                                ' previous pHierCC run with calculated distance 0 (Default: None).',
-              default='', required=False, type=click.Path())
-@click.option('-b', '--profile_distance1', help='[INPUT; optional] The .npy output of a '
-                                           'previous pHierCC run with calculated distance 1 (Default: None).',
-              default='', required=False, type=click.Path())
 @click.option('-m', '--allowed_missing', help='[INPUT; optional] Allowed proportion of '
                                               'missing genes in pairwise comparisons (Default: 0.05). ',
               default=0.05, type=float)
@@ -154,15 +148,15 @@ def _split_local(rows, row_names):
 @click.option('--clean', is_flag=True, default=False,
               help='Force full recalculation from scratch, removing any previous '
                    'run artefacts (dist0.npy, dist1.npy, ordering.npy).')
-def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_method, allowed_missing, clean):
+def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
     """
     pHierCC functions takes a file containing allelic profiles (as in https://pubmlst.org/data/), calculates
     distance between each profile (dual_dist function from getDistance) and performs
     hierarchical clustering of the full dataset based on a minimum-spanning (or macimum) tree.
 
-    When ordering.npy and dist0.npy exist in the output directory (from a previous run)
-    and --profile_distance0 is NOT provided, incremental mode is activated: old
-    distances are reused and only pairs involving new STs are computed.
+    When dist0.npy, dist1.npy and ordering.npy all exist in the output directory
+    (from a previous run), incremental mode is activated: old distances are
+    reused and only pairs involving new STs are computed.
     """
 
     output_dir = os.path.dirname(profile)
@@ -192,9 +186,9 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
     # --- Decide: incremental or full mode ---
     incremental = False
     old_n = 0
-    if (not profile_distance0
-            and os.path.exists(ordering_path)
-            and os.path.exists(numpy_dist0_out)):
+    if (os.path.exists(ordering_path)
+            and os.path.exists(numpy_dist0_out)
+            and os.path.exists(numpy_dist1_out)):
 
         old_ordering = np.load(ordering_path, allow_pickle=True)
         old_n = len(old_ordering)
@@ -284,10 +278,7 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
 
     # ---- Distance matrix 0 (condensed / squareform) ----
 
-    if profile_distance0:
-        logging.info('Reading user-provided distance matrix 0')
-        dist = np.load(profile_distance0, allow_pickle=True)
-    elif incremental:
+    if incremental:
         logging.info('Expanding distance matrix 0 (incremental)')
         dist = ExpandSquareformParallel(numpy_dist0_out, old_n, mat,
                                         n_proc, allowed_missing)
@@ -328,10 +319,7 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
 
     # ---- Phase 2: attach genomes and save (uses dist1) ----
 
-    if profile_distance1:
-        logging.info('Reading user-provided distance matrix 1')
-        dist = np.load(profile_distance1, allow_pickle=True, fix_imports=True)
-    elif incremental and os.path.exists(numpy_dist1_out):
+    if incremental:
         logging.info('Expanding distance matrix 1 (incremental)')
         dist = ExpandDistanceParallel(numpy_dist1_out, old_n, mat,
                                        n_proc, allowed_missing, depth=1)
