@@ -180,7 +180,8 @@ for species in Campylobacter Escherichia Salmonella; do
            --user "$(id -u):$(id -g)" \
            --ulimit nofile=262144:262144 \
            ${image_name} --profile "/dane/${profile_file}" -n ${cpus} \
-           --clustering_method single ${clean_flag}
+           --clustering_method single --clustering_method complete \
+           ${clean_flag}
     rc=$?
     set -e
 
@@ -193,16 +194,6 @@ for species in Campylobacter Escherichia Salmonella; do
     fi
 
     any_updated=true
-
-    docker run --rm \
-           --volume "${output}/${species}/:/dane:rw" \
-           --user "$(id -u):$(id -g)" \
-           --ulimit nofile=262144:262144 \
-           ${image_name} --profile "/dane/${profile_file}" \
-           --profile_distance0 "/dane/dist0.npy" \
-           --profile_distance1 "/dane/dist1.npy" \
-           -n 1 --clustering_method complete
-
     echo "Finished calculations for ${species}"
 done
 

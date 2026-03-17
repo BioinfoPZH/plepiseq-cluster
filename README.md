@@ -80,7 +80,7 @@ Output files (`dist0.npy`, `dist1.npy`, `ordering.npy`, `profile_single_linkage.
 |------|-------------|---------|
 | `-p`, `--profile` | Path to tab-separated allelic profile file (can be gzipped) | *required* |
 | `-n`, `--n_proc` | Number of threads for Numba parallel distance computation | 4 |
-| `--clustering_method` | Linkage criterion: `single` or `complete` | `single` |
+| `--clustering_method` | Linkage criterion (`single` / `complete`). Can be specified multiple times to run both in one invocation. | `single` |
 | `-m`, `--allowed_missing` | Allowed proportion of missing genes in pairwise comparisons | 0.05 |
 | `-a`, `--profile_distance0` | Pre-computed condensed distance matrix (`.npy`) | *auto-detected* |
 | `-b`, `--profile_distance1` | Pre-computed full distance matrix (`.npy`) | *auto-detected* |
@@ -125,9 +125,9 @@ docker run --rm \
 
 Safeguards: if any old STs are missing from the new profile, or the cached distance matrix size does not match the expected number of STs, pHierCC falls back to full mode with a warning.
 
-### Complete linkage (reusing distance matrices)
+### Multiple clustering methods in one run
 
-Complete linkage clustering can reuse distance matrices computed during a single linkage run, avoiding duplicate calculation:
+Pass `--clustering_method` more than once to perform several linkage methods without reloading the distance matrices:
 
 ```bash
 docker run --rm \
@@ -135,11 +135,11 @@ docker run --rm \
     --user $(id -u):$(id -g) \
     --ulimit nofile=262144:262144 \
     plepiseq-cluster:latest \
-    --profile /dane/profiles.list.gz \
-    --profile_distance0 /dane/dist0.npy \
-    --profile_distance1 /dane/dist1.npy \
-    -n 1 --clustering_method complete
+    --profile /dane/profiles.list.gz -n 200 \
+    --clustering_method single --clustering_method complete
 ```
+
+This produces both `profile_single_linkage.HierCC.gz` and `profile_complete_linkage.HierCC.gz` in a single invocation, avoiding the hours-long reload of distance matrices that a separate complete-linkage run would require.
 
 ### Forcing full recalculation
 

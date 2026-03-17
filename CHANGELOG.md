@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.2.6] - 2026-03-17
+### Changed
+- `--clustering_method` now accepts multiple values (e.g. `--clustering_method single --clustering_method complete`) to run both linkage methods in a single invocation, avoiding hours-long distance matrix reloads.
+- `run_clustering.sh` reduced from two Docker invocations per species to one.
+- Updated README documentation with multi-method usage examples.
+
 ## [0.2.5] - 2026-03-17
 ### Changed
 - pHierCC now skips computation entirely (exit code 42) when the profile contains the same STs as the previous run, with set-level verification to catch swapped STs.
