@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2026-03-17
+### Removed
+- Dropped `-a`/`--profile_distance0` and `-b`/`--profile_distance1` CLI options. Distance matrices are now always stored as `dist0.npy` and `dist1.npy` in the profile directory. Incremental mode triggers only when all three artefacts (`dist0.npy`, `dist1.npy`, `ordering.npy`) are present.
+
 ## [0.2.6] - 2026-03-17
 ### Changed
 - `--clustering_method` now accepts multiple values (e.g. `--clustering_method single --clustering_method complete`) to run both linkage methods in a single invocation, avoiding hours-long distance matrix reloads.
