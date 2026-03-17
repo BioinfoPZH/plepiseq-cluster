@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2026-03-17
+### Changed
+- pHierCC now skips computation entirely (exit code 42) when the profile contains the same STs as the previous run, with set-level verification to catch swapped STs.
+- `run_clustering.sh` captures per-species exit codes; skips complete linkage when single linkage reports no changes; only creates a GitHub Release when at least one species was updated.
+- Refactored the three per-species clustering blocks in `run_clustering.sh` into a single loop.
+
 ## [0.2.4] - 2026-03-15
 ### Changed
 - Merged `plepiseq_bin/` into `tools/`; all scripts now live under a single directory.
