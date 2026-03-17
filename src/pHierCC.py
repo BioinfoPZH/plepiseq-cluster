@@ -14,11 +14,11 @@
 #  To execute type:
 #  pHierCC --profile <path> \
 #          --cpus <int> \
-#          --clustering_method "single|complete" \
+#          --clustering_method single --clustering_method complete \
 #          --allowed_missing <float> \
 # Output files are named based on the linkage criterion used for clustering
-# profile_{clustering_method}_linkage.HierCC.gz and \
-# profile_{clustering_method}_linkage.HierCC.index
+# profile_{method}_linkage.HierCC.gz and profile_{method}_linkage.HierCC.index
+# (one pair per requested method)
 
 
 import sys, gzip, logging, click
@@ -134,32 +134,29 @@ def _split_local(rows, row_names):
                                       'table of columns of the ST numbers and the allelic numbers, '
                                       'separated by tabs. Can be GZIPped.',
               required=True, type=click.Path())
-@click.option('-a', '--profile_distance0', help='[INPUT; optional] The .npy output of a'
-                                                ' previous pHierCC run with calculated distance 0 (Default: None).',
-              default='', required=False, type=click.Path())
-@click.option('-b', '--profile_distance1', help='[INPUT; optional] The .npy output of a '
-                                           'previous pHierCC run with calculated distance 1 (Default: None).',
-              default='', required=False, type=click.Path())
 @click.option('-m', '--allowed_missing', help='[INPUT; optional] Allowed proportion of '
                                               'missing genes in pairwise comparisons (Default: 0.05). ',
               default=0.05, type=float)
 @click.option('-n', '--n_proc', help='[INPUT; optional] Number of processes (CPUs) to use '
                                      '(Default: 4).', default=4, type=int)
-@click.option('--clustering_method', help='[INPUT; optional] A linkage criterion for clustering '
-                                          ' (Default: single).', default="single",
-              type=click.Choice(['single', 'complete']))
+@click.option('--clustering_method', multiple=True,
+              type=click.Choice(['single', 'complete']),
+              default=('single',),
+              help='Linkage criterion(s). Can be specified multiple times to '
+                   'run several methods in a single invocation (e.g. '
+                   '--clustering_method single --clustering_method complete).')
 @click.option('--clean', is_flag=True, default=False,
               help='Force full recalculation from scratch, removing any previous '
                    'run artefacts (dist0.npy, dist1.npy, ordering.npy).')
-def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_method, allowed_missing, clean):
+def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
     """
     pHierCC functions takes a file containing allelic profiles (as in https://pubmlst.org/data/), calculates
     distance between each profile (dual_dist function from getDistance) and performs
     hierarchical clustering of the full dataset based on a minimum-spanning (or macimum) tree.
 
-    When ordering.npy and dist0.npy exist in the output directory (from a previous run)
-    and --profile_distance0 is NOT provided, incremental mode is activated: old
-    distances are reused and only pairs involving new STs are computed.
+    When dist0.npy, dist1.npy and ordering.npy all exist in the output directory
+    (from a previous run), incremental mode is activated: old distances are
+    reused and only pairs involving new STs are computed.
     """
 
     output_dir = os.path.dirname(profile)
@@ -189,20 +186,32 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
     # --- Decide: incremental or full mode ---
     incremental = False
     old_n = 0
-    if (not profile_distance0
-            and os.path.exists(ordering_path)
-            and os.path.exists(numpy_dist0_out)):
+    if (os.path.exists(ordering_path)
+            and os.path.exists(numpy_dist0_out)
+            and os.path.exists(numpy_dist1_out)):
 
         old_ordering = np.load(ordering_path, allow_pickle=True)
         old_n = len(old_ordering)
         old_ordering_str = [str(x) for x in old_ordering]
 
-        if old_n >= mat.shape[0]:
-            logging.info('No new STs compared to previous run – falling back to full mode.')
-        else:
-            new_name_set = set(str(n) for n in names)
-            missing_sts = [st for st in old_ordering_str if st not in new_name_set]
+        new_name_set = set(str(n) for n in names)
+        missing_sts = [st for st in old_ordering_str if st not in new_name_set]
 
+        if old_n > mat.shape[0]:
+            logging.warning(
+                f'New profile has fewer STs ({mat.shape[0]}) than previous '
+                f'run ({old_n}). Falling back to full mode.')
+        elif old_n == mat.shape[0]:
+            if missing_sts:
+                logging.warning(
+                    f'{len(missing_sts)} old STs replaced by new ones '
+                    f'(e.g. {missing_sts[:5]}). Falling back to full mode.')
+            else:
+                logging.info(
+                    'Profile unchanged – same STs as previous run. '
+                    'Skipping calculations.')
+                sys.exit(42)
+        else:
             if missing_sts:
                 logging.warning(
                     f'{len(missing_sts)} old STs missing from new profile '
@@ -269,10 +278,7 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
 
     # ---- Distance matrix 0 (condensed / squareform) ----
 
-    if profile_distance0:
-        logging.info('Reading user-provided distance matrix 0')
-        dist = np.load(profile_distance0, allow_pickle=True)
-    elif incremental:
+    if incremental:
         logging.info('Expanding distance matrix 0 (incremental)')
         dist = ExpandSquareformParallel(numpy_dist0_out, old_n, mat,
                                         n_proc, allowed_missing)
@@ -284,33 +290,36 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
         logging.info(f'Saving distance matrix 0 to {numpy_dist0_out}')
         np.save(numpy_dist0_out, dist, allow_pickle=True, fix_imports=True)
 
-    # create object for an output matrix
-    res = np.repeat(mat.T[0], int(mat.shape[1]) + 1).reshape(mat.shape[0], -1)
-    res[res < 0] = np.max(mat.T[0]) + 100
-    res.T[0] = mat.T[0]
+    # ---- Phase 1: hierarchical clustering (uses dist0) ----
 
-    logging.info(f'Start {clustering_method} linkage clustering')
-    slc = linkage(dist, method=f'{clustering_method}')
-    del dist
-
+    res_template = np.repeat(mat.T[0], int(mat.shape[1]) + 1).reshape(mat.shape[0], -1)
+    res_template[res_template < 0] = np.max(mat.T[0]) + 100
+    res_template.T[0] = mat.T[0]
 
     index = {s: i for i, s in enumerate(mat.T[0])}
-    descendents = [[m] for m in mat.T[0]] + [None for _ in np.arange(mat.shape[0] - 1)]
-    for idx, c in enumerate(slc.astype(int)):
-        n_id = idx + mat.shape[0]
-        d = sorted([int(c[0]), int(c[1])], key=lambda x: descendents[x][0])
-        min_id = min(descendents[d[0]])
-        descendents[n_id] = descendents[d[0]] + descendents[d[1]]
-        for tgt in descendents[d[1]]:
-            res[index[tgt], c[2] + 1:] = res[index[min_id], c[2] + 1:]
+    results = {}
 
+    for method in clustering_method:
+        logging.info(f'Start {method} linkage clustering')
+        res = res_template.copy()
+        slc = linkage(dist, method=method)
 
-    # ---- Distance matrix 1 (full lower-triangular) ----
+        descendents = [[m] for m in mat.T[0]] + [None for _ in np.arange(mat.shape[0] - 1)]
+        for idx, c in enumerate(slc.astype(int)):
+            n_id = idx + mat.shape[0]
+            d = sorted([int(c[0]), int(c[1])], key=lambda x: descendents[x][0])
+            min_id = min(descendents[d[0]])
+            descendents[n_id] = descendents[d[0]] + descendents[d[1]]
+            for tgt in descendents[d[1]]:
+                res[index[tgt], c[2] + 1:] = res[index[min_id], c[2] + 1:]
 
-    if profile_distance1:
-        logging.info('Reading user-provided distance matrix 1')
-        dist = np.load(profile_distance1, allow_pickle=True, fix_imports=True)
-    elif incremental and os.path.exists(numpy_dist1_out):
+        results[method] = res
+
+    del dist
+
+    # ---- Phase 2: attach genomes and save (uses dist1) ----
+
+    if incremental:
         logging.info('Expanding distance matrix 1 (incremental)')
         dist = ExpandDistanceParallel(numpy_dist1_out, old_n, mat,
                                        n_proc, allowed_missing, depth=1)
@@ -322,26 +331,27 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
         logging.info(f'Saving distance matrix 1 to {numpy_dist1_out}')
         np.save(numpy_dist1_out, dist, allow_pickle=True, fix_imports=True)
 
+    for method in clustering_method:
+        res = results[method]
+        logging.info(f'Attach genomes onto the tree ({method}).')
+        for id, (r, d) in enumerate(zip(res[start:], dist[:, :, 0])):
+            if id + start > 0:
+                i = np.argmin(d[:id+start])
+                min_d = d[i]
+                if r[min_d + 1] > res[i, min_d + 1]:
+                    r[min_d + 1:] = res[i, min_d + 1:]
 
-    logging.info('Attach genomes onto the tree.')
-    for id, (r, d) in enumerate(zip(res[start:], dist[:, :, 0])):
-        if id + start > 0 :
-            i = np.argmin(d[:id+start])
-            min_d = d[i]
-            if r[min_d + 1] > res[i, min_d + 1]:
-                r[min_d + 1:] = res[i, min_d + 1:]
+        res.T[0] = mat.T[0]
+        res = res[np.argsort(res.T[0])]
 
-    logging.info('Saving data.')
-    res.T[0] = mat.T[0]
-    res = res[np.argsort(res.T[0])]
+        with gzip.open(f'{output_dir}/profile_{method}_linkage.HierCC.gz', 'wt') as fout:
+            fout.write('#ST_id\t{0}\n'.format('\t'.join(['HC' + str(id) for id in np.arange(n_loci + 1)])))
+            for n, r in zip(names, res):
+                fout.write('\t'.join([str(n)] + [str(rr) for rr in r[1:]]) + '\n')
+        prep_index(f'{output_dir}/profile_{method}_linkage.HierCC.gz')
+        logging.info(f'Saving clustering results to profile_{method}_linkage.HierCC.gz')
 
-    with gzip.open(f'{output_dir}/profile_{clustering_method}_linkage.HierCC.gz', 'wt') as fout:
-        fout.write('#ST_id\t{0}\n'.format('\t'.join(['HC' + str(id) for id in np.arange(n_loci + 1)])))
-        for n, r in zip(names, res):
-            fout.write('\t'.join([str(n)] + [str(rr) for rr in r[1:]]) + '\n')
-    prep_index(f'{output_dir}/profile_{clustering_method}_linkage.HierCC.gz')
-    logging.info(f'Saving clustering results to profile_{clustering_method}_linkage.HierCC.gz')
-
+    del dist
     return True
 
 if __name__ == '__main__':

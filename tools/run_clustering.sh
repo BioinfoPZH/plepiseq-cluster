@@ -161,81 +161,63 @@ fi
 
 # ---------------------------------------------------------------------------
 # Clustering
+# pHierCC exits with code 42 when the profile is unchanged (no new STs).
+# We track whether at least one species was updated to decide if a release
+# should be created.
 # ---------------------------------------------------------------------------
+any_updated=false
 
-echo "Running clustering for Campylobacter on ${cpus} CPUs"
-docker run --rm \
-       --volume "${output}/Campylobacter/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list" -n ${cpus} \
-       --clustering_method single ${clean_flag}
+for species in Campylobacter Escherichia Salmonella; do
+    profile_file="profiles.list.gz"
+    if [ "$species" = "Campylobacter" ]; then
+        profile_file="profiles.list"
+    fi
 
-docker run --rm \
-       --volume "${output}/Campylobacter/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list" \
-       --profile_distance0 "/dane/dist0.npy" \
-       --profile_distance1 "/dane/dist1.npy" \
-       -n 1 --clustering_method complete
-echo "Finished calculations for Campylobacter"
+    echo "Running clustering for ${species} on ${cpus} CPUs"
+    set +e
+    docker run --rm \
+           --volume "${output}/${species}/:/dane:rw" \
+           --user "$(id -u):$(id -g)" \
+           --ulimit nofile=262144:262144 \
+           ${image_name} --profile "/dane/${profile_file}" -n ${cpus} \
+           --clustering_method single --clustering_method complete \
+           ${clean_flag}
+    rc=$?
+    set -e
 
+    if [ "$rc" -eq 42 ]; then
+        echo "No new STs for ${species}, skipping."
+        continue
+    elif [ "$rc" -ne 0 ]; then
+        echo "pHierCC failed for ${species} (exit ${rc})"
+        exit "$rc"
+    fi
 
-echo "Running clustering for Ecoli on ${cpus} CPUs"
-docker run --rm \
-       --volume "${output}/Escherichia/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list.gz" -n ${cpus} \
-       --clustering_method single ${clean_flag}
-
-docker run --rm \
-       --volume "${output}/Escherichia/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list.gz" \
-       --profile_distance0 "/dane/dist0.npy" \
-       --profile_distance1 "/dane/dist1.npy" \
-       -n 1 --clustering_method complete
-echo "Finished calculations for Ecoli"
-
-
-echo "Running clustering for Salmonella on ${cpus} CPUs"
-docker run --rm \
-       --volume "${output}/Salmonella/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list.gz" -n ${cpus} \
-       --clustering_method single ${clean_flag}
-
-docker run --rm \
-       --volume "${output}/Salmonella/:/dane:rw" \
-       --user "$(id -u):$(id -g)" \
-       --ulimit nofile=262144:262144 \
-       ${image_name} --profile "/dane/profiles.list.gz" \
-       --profile_distance0 "/dane/dist0.npy" \
-       --profile_distance1 "/dane/dist1.npy" \
-       -n 1 --clustering_method complete
-echo "Finished calculations for Salmonella"
-
-# ---------------------------------------------------------------------------
-# Publish results as a GitHub Release
-# ---------------------------------------------------------------------------
-echo "Publishing results as GitHub Release v${TIMESTAMP}"
-
-release_dir=$(mktemp -d)
-
-for species in Salmonella Escherichia Campylobacter; do
-    for f in "${output}/${species}"/*HierCC*; do
-        cp "$f" "${release_dir}/${species}_$(basename "$f")"
-    done
+    any_updated=true
+    echo "Finished calculations for ${species}"
 done
 
-gh release create "v${TIMESTAMP}" \
-    --title "Weekly clustering ${TIMESTAMP}" \
-    --notes "Profiles downloaded on ${TIMESTAMP}." \
-    "${release_dir}"/*
+# ---------------------------------------------------------------------------
+# Publish results as a GitHub Release (only if at least one species updated)
+# ---------------------------------------------------------------------------
+if [ "$any_updated" = true ]; then
+    echo "Publishing results as GitHub Release v${TIMESTAMP}"
 
-rm -rf "${release_dir}"
-echo "Release v${TIMESTAMP} published successfully."
+    release_dir=$(mktemp -d)
+
+    for species in Salmonella Escherichia Campylobacter; do
+        for f in "${output}/${species}"/*HierCC*; do
+            cp "$f" "${release_dir}/${species}_$(basename "$f")"
+        done
+    done
+
+    gh release create "v${TIMESTAMP}" \
+        --title "Weekly clustering ${TIMESTAMP}" \
+        --notes "Profiles downloaded on ${TIMESTAMP}." \
+        "${release_dir}"/*
+
+    rm -rf "${release_dir}"
+    echo "Release v${TIMESTAMP} published successfully."
+else
+    echo "No species had new STs. Skipping release."
+fi
