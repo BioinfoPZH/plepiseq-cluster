@@ -197,12 +197,24 @@ def phierCC(profile, profile_distance0, profile_distance1, n_proc, clustering_me
         old_n = len(old_ordering)
         old_ordering_str = [str(x) for x in old_ordering]
 
-        if old_n >= mat.shape[0]:
-            logging.info('No new STs compared to previous run – falling back to full mode.')
-        else:
-            new_name_set = set(str(n) for n in names)
-            missing_sts = [st for st in old_ordering_str if st not in new_name_set]
+        new_name_set = set(str(n) for n in names)
+        missing_sts = [st for st in old_ordering_str if st not in new_name_set]
 
+        if old_n > mat.shape[0]:
+            logging.warning(
+                f'New profile has fewer STs ({mat.shape[0]}) than previous '
+                f'run ({old_n}). Falling back to full mode.')
+        elif old_n == mat.shape[0]:
+            if missing_sts:
+                logging.warning(
+                    f'{len(missing_sts)} old STs replaced by new ones '
+                    f'(e.g. {missing_sts[:5]}). Falling back to full mode.')
+            else:
+                logging.info(
+                    'Profile unchanged – same STs as previous run. '
+                    'Skipping calculations.')
+                sys.exit(42)
+        else:
             if missing_sts:
                 logging.warning(
                     f'{len(missing_sts)} old STs missing from new profile '
