@@ -33,6 +33,8 @@ RUN cp -r build-install/lib/python3.11/site-packages/scipy/ /usr/local/lib/pytho
 
 RUN pip install pandas numba tbb
 RUN pip install --no-deps pHierCC
+RUN pip install numba-cuda[cu13]
+
 COPY src/getDistance.py /usr/local/lib/python3.11/site-packages/pHierCC/getDistance.py
 COPY src/pHierCC.py /usr/local/lib/python3.11/site-packages/pHierCC/pHierCC.py
 ENTRYPOINT ["pHierCC"]
