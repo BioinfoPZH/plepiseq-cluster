@@ -1,12 +1,13 @@
-import numpy as np
-import numba as nb
 import logging
 
+import numba as nb
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Numba-parallel distance computation using prange + TBB work-stealing.
 # No multiprocessing Pool, no SharedArray.
 # ---------------------------------------------------------------------------
+
 
 @nb.jit(nopython=True, parallel=True, fastmath=True, boundscheck=False)
 def _squareform_numba_parallel(mat, allowed_missing=0.05):
@@ -138,10 +139,11 @@ def _squareform_append_numba_parallel(mat, n_old, dist, allowed_missing=0.05):
 # Public API called from pHierCC
 # ---------------------------------------------------------------------------
 
+
 def GetSquareformParallel(data, n_threads, allowed_missing=0.0):
     """Compute condensed distance matrix (dist0)."""
     nb.set_num_threads(n_threads)
-    logging.info(f'Numba parallel: using {nb.get_num_threads()} threads')
+    logging.info(f"Numba parallel: using {nb.get_num_threads()} threads")
 
     warmup = np.random.randint(0, 2, size=(4, 10)).astype(np.int32)
     _squareform_numba_parallel(warmup, 0.05)
@@ -161,28 +163,27 @@ def GetDistanceParallel(data, n_threads, start=0, allowed_missing=0.0, depth=0):
     return dist
 
 
-def ExpandSquareformParallel(old_dist_path, old_n, new_mat, n_threads,
-                              allowed_missing=0.0):
+def ExpandSquareformParallel(old_dist_path, old_n, new_mat, n_threads, allowed_missing=0.0):
     """Expand condensed distance vector with newly appended STs (dist0 incremental)."""
     nb.set_num_threads(n_threads)
     n_new = new_mat.shape[0]
-    old_dist = np.load(old_dist_path, mmap_mode='r', allow_pickle=True)
+    old_dist = np.load(old_dist_path, mmap_mode="r", allow_pickle=True)
 
     new_size = int(n_new * (n_new - 1) / 2)
     dist = np.zeros(new_size, dtype=np.int16)
 
-    logging.info(f'Copying old condensed distances ({old_n} STs) into new vector ({n_new} STs)')
+    logging.info(f"Copying old condensed distances ({old_n} STs) into new vector ({n_new} STs)")
     for i in range(old_n):
         old_start = old_n * i - i * (i + 1) // 2
         new_start = n_new * i - i * (i + 1) // 2
         length = old_n - 1 - i
         if length > 0:
-            dist[new_start:new_start + length] = old_dist[old_start:old_start + length]
+            dist[new_start : new_start + length] = old_dist[old_start : old_start + length]
     del old_dist
 
     n_new_sts = n_new - old_n
     total_new = old_n * n_new_sts + n_new_sts * (n_new_sts - 1) // 2
-    logging.info(f'Computing {total_new} new pairwise distances ({n_new_sts} new STs)')
+    logging.info(f"Computing {total_new} new pairwise distances ({n_new_sts} new STs)")
 
     warmup = np.random.randint(0, 2, size=(4, 10)).astype(np.int32)
     warmup_d = np.zeros(int(4 * 3 / 2), dtype=np.int16)
@@ -192,8 +193,7 @@ def ExpandSquareformParallel(old_dist_path, old_n, new_mat, n_threads,
     return dist
 
 
-def ExpandDistanceParallel(old_dist_path, old_n, new_mat, n_threads,
-                            allowed_missing=0.0, depth=0):
+def ExpandDistanceParallel(old_dist_path, old_n, new_mat, n_threads, allowed_missing=0.0, depth=0):
     """Expand full distance matrix with newly appended STs (dist1 incremental)."""
     nb.set_num_threads(n_threads)
     n_new = new_mat.shape[0]
@@ -204,7 +204,7 @@ def ExpandDistanceParallel(old_dist_path, old_n, new_mat, n_threads,
     new_rows = _dist1_numba_parallel(new_mat[:, 1:], old_n, allowed_missing, depth)
 
     full_dist = np.zeros((n_new, n_new, 1), dtype=np.int16)
-    old_dist = np.load(old_dist_path, mmap_mode='r', allow_pickle=True)
+    old_dist = np.load(old_dist_path, mmap_mode="r", allow_pickle=True)
     full_dist[:old_n, :old_n, :] = old_dist[:, :, :]
     del old_dist
 
