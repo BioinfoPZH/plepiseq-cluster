@@ -20,8 +20,9 @@ set -euo pipefail
 ###               are preserved across runs unless --clean is passed.
 ### --cpus        Number of threads for Numba parallel distance computation
 ### --clean       Force full recalculation (removes cached distance matrices)
-### --gpu-ids     Space-separated CUDA device IDs (e.g. "0 1 2 3"). When set,
-###               GPU acceleration is used and --cpus controls only clustering.
+### --gpu-ids     Space-separated CUDA device IDs (e.g. "0 1 2 3") or "all"
+###               to auto-detect. When set, GPU acceleration is used and
+###               --cpus controls only clustering.
 ### --block-size  Tile edge size for GPU computation (default: 100000)
 ###
 ### Script will crash if machine has less than 600 Gb of RAM
@@ -47,7 +48,7 @@ function show_help() {
     echo "  --image_name   Docker image name:tag built from the Dockerfile"
     echo "  --cpus         Number of CPUs/threads (default: 1)"
     echo "  --clean        Force full recalculation (remove cached .npy files)"
-    echo "  --gpu-ids      Space-separated GPU device IDs (e.g. \"0 1 2 3\")"
+    echo "  --gpu-ids      GPU device IDs (e.g. \"0 1 2 3\") or \"all\" to auto-detect"
     echo "  --block-size   Tile edge size for GPU computation (default: 100000)"
     echo "  -h, --help     Show this help message"
 }
@@ -136,6 +137,23 @@ fi
 if ! command -v gh &>/dev/null; then
     echo "Error: gh CLI not found. Install it from https://cli.github.com/"
     exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve --gpu-ids "all" to actual device IDs via nvidia-smi
+# ---------------------------------------------------------------------------
+if [[ "$gpu_ids" == "all" ]]; then
+    if ! command -v nvidia-smi &>/dev/null; then
+        echo "Error: --gpu-ids all requires nvidia-smi to detect devices."
+        exit 1
+    fi
+    n_gpus=$(nvidia-smi --list-gpus | wc -l)
+    if [[ "$n_gpus" -lt 1 ]]; then
+        echo "Error: nvidia-smi found 0 GPUs."
+        exit 1
+    fi
+    gpu_ids=$(seq -s ' ' 0 $((n_gpus - 1)))
+    echo "Detected ${n_gpus} GPUs: ${gpu_ids}"
 fi
 
 # ---------------------------------------------------------------------------

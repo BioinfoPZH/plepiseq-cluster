@@ -14,6 +14,7 @@ import queue
 import tempfile
 import time
 import traceback
+import warnings
 from dataclasses import dataclass
 
 import numba as nb
@@ -321,7 +322,9 @@ if HAS_CUDA:
         d_a = cuda.to_device(a)
         d_q = cuda.to_device(q)
         d_out = cuda.device_array((warm, warm), dtype=np.int16)
-        kernel[(4, 4), (16, 16)](d_a, d_a, d_q, d_q, d_out, warm, 0.05, 0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            kernel[(4, 4), (16, 16)](d_a, d_a, d_q, d_q, d_out, warm, 0.05, 0)
         cuda.synchronize()
 
     def _gpu_worker(
@@ -339,6 +342,7 @@ if HAS_CUDA:
     ):
         """Worker process: select GPU, process tiles, write results."""
         try:
+            logging.getLogger("numba").setLevel(logging.WARNING)
             cuda.select_device(gpu_id)
             kernel = _dist0_tile_kernel if mode == "condensed" else _dist1_tile_kernel
             _warmup_cuda_kernel(kernel)
@@ -422,6 +426,7 @@ if HAS_CUDA:
         mode: "condensed" for dist0, "full" for dist1.
         Writes result directly to output_path as a .npy memmap.
         """
+        logging.getLogger("numba").setLevel(logging.WARNING)
         n = loci.shape[0]
 
         available = len(list(cuda.gpus))
