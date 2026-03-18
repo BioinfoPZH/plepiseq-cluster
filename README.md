@@ -12,11 +12,12 @@ A modified version of [pHierCC](https://github.com/zheminzhou/pHierCC) (Zhou et 
 2. [Quick start](#quick-start)
 3. [Requirements](#requirements)
 4. [Running pHierCC](#running-phiercc)
-5. [Clustering results](#clustering-results-github-releases)
-6. [Repository structure](#repository-structure)
-7. [Related projects](#related-projects)
-8. [Citation](#citation)
-9. [License](#license)
+5. [GPU acceleration](#gpu-acceleration)
+6. [Clustering results](#clustering-results-github-releases)
+7. [Repository structure](#repository-structure)
+8. [Related projects](#related-projects)
+9. [Citation](#citation)
+10. [License](#license)
 
 ---
 
@@ -26,7 +27,8 @@ A modified version of [pHierCC](https://github.com/zheminzhou/pHierCC) (Zhou et 
 - **Numba parallel threading** -- Replaced original parrarelization approach with Numba. This lowers memory overhead and imptove load balancing on triangular workloads.
 - **Incremental distance computation** -- Add ability to reuse previously computed distance matrices to speed up calculation that include novel STs reducing calculation time.
 - **Mixed ST identifiers** -- Support for both numeric and text-based sequence type identifiers.
-- **Dockerized build** --  a single Docker image to run all calculations.
+- **Multi-GPU CUDA acceleration** -- Optional GPU path tiles the distance computation across multiple CUDA devices, reducing hours-long calculations to minutes.
+- **Dockerized build** -- GPU (`Dockerfile`) and CPU-only (`Dockerfile.cpu`) images available.
 
 ---
 
@@ -83,6 +85,9 @@ Output files (`dist0.npy`, `dist1.npy`, `ordering.npy`, `profile_single_linkage.
 | `--clustering_method` | Linkage criterion (`single` / `complete`). Can be specified multiple times to run both in one invocation. | `single` |
 | `-m`, `--allowed_missing` | Allowed proportion of missing genes in pairwise comparisons | 0.05 |
 | `--clean` | Force full recalculation, removing cached distance matrices | `false` |
+| `--gpu-ids` | CUDA GPU device IDs (can be repeated). Enables GPU distance computation; disables incremental mode. | *(disabled)* |
+| `--block-size` | Tile edge size for GPU computation | 100000 |
+| `--threads-per-block` | CUDA threads per block (two integers) | `16 16` |
 
 ### Full mode (first run)
 
@@ -154,6 +159,48 @@ docker run --rm \
 
 ---
 
+## GPU acceleration
+
+When CUDA GPUs are available, distance matrix computation can be offloaded to one or more devices using the `--gpu-ids` flag. GPU mode always performs a full recalculation (incremental mode is disabled) but is dramatically faster -- e.g. ~12 minutes vs. 2-3 hours for 395k STs on 7 GPUs.
+
+### Docker prerequisites
+
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host.
+- Build the GPU-enabled image using the default `Dockerfile` (which includes `numba-cuda`):
+
+```bash
+docker build -t plepiseq-cluster:latest .
+```
+
+For machines **without** GPUs, build the CPU-only image:
+
+```bash
+docker build -f Dockerfile.cpu -t plepiseq-cluster:cpu .
+```
+
+### Running with GPUs
+
+```bash
+docker run --rm \
+    --gpus '"device=0,1,2,3"' \
+    --volume /path/to/workdir:/dane:rw \
+    --user $(id -u):$(id -g) \
+    plepiseq-cluster:latest \
+    --profile /dane/profiles.list.gz -n 200 \
+    --clustering_method single --clustering_method complete \
+    --gpu-ids 0 --gpu-ids 1 --gpu-ids 2 --gpu-ids 3
+```
+
+The `--gpus` flag exposes host GPUs to the container; the `--gpu-ids` flags tell pHierCC which devices to use for distance tiling.
+
+### Performance notes
+
+- **Clustering** (linkage, attach genomes) still runs on CPUs -- only the distance matrices are GPU-accelerated.
+- Tile size (`--block-size`) controls GPU memory usage per tile. The default of 100,000 works well for most setups; reduce it if you encounter out-of-memory errors.
+- The `--threads-per-block` flag (default `16 16`) rarely needs tuning.
+
+---
+
 ## Clustering results (GitHub Releases)
 
 Pre-computed weekly clustering results for Salmonella, Escherichia, and Campylobacter are published as GitHub Release assets. To download the latest results:
@@ -175,10 +222,11 @@ Releases follow the naming convention `vYYYY.MM.DD`, corresponding to the date w
 ## Repository structure
 
 ```
-├── Dockerfile                      # Docker image build (custom SciPy + Numba + TBB)
+├── Dockerfile                      # GPU Docker image (SciPy + Numba + CUDA)
+├── Dockerfile.cpu                  # CPU-only Docker image (no CUDA)
 ├── src/
 │   ├── pHierCC.py                  # Main clustering script (CLI entrypoint)
-│   └── getDistance.py              # Numba parallel distance computation kernels
+│   └── getDistance.py              # Distance kernels (CPU Numba + CUDA GPU)
 ├── scipy_patches/                  # Modified SciPy cluster module (int16 support)
 │   ├── hierarchy.py
 │   └── _hierarchy.pyx

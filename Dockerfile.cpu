@@ -1,0 +1,39 @@
+FROM python:3.11.8-bookworm
+LABEL maintainer "Michal Lazniewski <mlazniewski@pzh.gov.pl>"
+
+
+ARG DEBIAN_FRONTEND=noninteractive
+#continuumio/miniconda3
+
+RUN apt update && apt upgrade -y
+RUN apt install libopenblas-dev gfortran libboost-all-dev libtbb-dev -y
+
+# Patch SciPy cluster module to accept int16 distance matrices
+WORKDIR /opt
+RUN git clone https://github.com/scipy/scipy.git --tags
+WORKDIR /opt/scipy
+RUN git checkout 476428deacecf289cc1b39da8b1edb9d81e2facc
+COPY scipy_patches/hierarchy.py /opt/scipy/scipy/cluster/hierarchy.py
+COPY scipy_patches/_hierarchy.pyx /opt/scipy/scipy/cluster/_hierarchy.pyx
+
+RUN git submodule update --init
+RUN python -m pip install -r requirements/all.txt
+# Downgrade dependencies to fix compatibility issues with scipy 1.15.0
+RUN python -m pip install --upgrade --force-reinstall --no-cache-dir \
+"click==8.1.8" \
+"rich-click==1.8.5" \
+"doit==0.36.0" \
+"rich==13.9.4" \
+"pytest==8.3.4" \
+"pluggy==1.5.0" \
+"numpy==2.2.2" 
+
+RUN python dev.py build
+RUN cp -r build-install/lib/python3.11/site-packages/scipy/ /usr/local/lib/python3.11/
+
+RUN pip install pandas numba tbb
+RUN pip install --no-deps pHierCC
+
+COPY src/getDistance.py /usr/local/lib/python3.11/site-packages/pHierCC/getDistance.py
+COPY src/pHierCC.py /usr/local/lib/python3.11/site-packages/pHierCC/pHierCC.py
+ENTRYPOINT ["pHierCC"]
