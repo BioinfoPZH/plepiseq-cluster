@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 100
+extend-exclude = ["scipy_patches"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.format]
+docstring-code-format = true
