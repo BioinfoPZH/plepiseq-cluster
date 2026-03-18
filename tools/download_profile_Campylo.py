@@ -13,7 +13,8 @@ def main():
         description="Download Campylobacter cgMLST profiles from PubMLST."
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         default="profiles.list",
         help="Output file path (default: profiles.list)",
     )
