@@ -142,7 +142,9 @@ fi
 # ---------------------------------------------------------------------------
 # Resolve --gpu-ids "all" to actual device IDs via nvidia-smi
 # ---------------------------------------------------------------------------
+gpu_all=false
 if [[ "$gpu_ids" == "all" ]]; then
+    gpu_all=true
     if ! command -v nvidia-smi &>/dev/null; then
         echo "Error: --gpu-ids all requires nvidia-smi to detect devices."
         exit 1
@@ -171,11 +173,18 @@ fi
 
 # ---------------------------------------------------------------------------
 # Build docker GPU args (passed to docker run itself) -- bash array
+# Use --gpus all when user requested "all" to avoid the NVIDIA runtime
+# "cannot set both Count and DeviceIDs" error that occurs when all
+# device IDs are enumerated explicitly.
 # ---------------------------------------------------------------------------
 docker_gpu_args=()
 if [[ -n "$gpu_ids" ]]; then
-    device_list=$(echo "$gpu_ids" | tr ' ' ',')
-    docker_gpu_args+=(--gpus "device=${device_list}")
+    if [[ "$gpu_all" == true ]]; then
+        docker_gpu_args+=(--gpus all)
+    else
+        device_list=$(echo "$gpu_ids" | tr ' ' ',')
+        docker_gpu_args+=(--gpus "device=${device_list}")
+    fi
 fi
 
 # ---------------------------------------------------------------------------
