@@ -1,6 +1,16 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-03-18
+### Added
+- Multi-GPU CUDA acceleration for distance matrix computation
+- Memory-efficient streaming profile loader replaces the pandas-based function
+
+### Changed
+- `getDistance.py` now contains both CPU (Numba prange) and GPU (CUDA) distance kernels, tile orchestrator, and profile parsing utilities.
+- GPU mode always performs a full recalculation (incremental mode is disabled when `--gpu-ids` is specified).
+- Removed `pandas` dependency from `pHierCC.py`.
+
 ## [0.2.8] - 2026-03-18
 ### Changed
 - Add Ruff linting with GitHub Actions workflow and local pre-commit hook

@@ -28,22 +28,29 @@ import sys
 
 import click
 import numpy as np
-import pandas as pd
 from scipy.cluster.hierarchy import linkage
 
 try:
     from getDistance import (
+        HAS_CUDA,
         ExpandDistanceParallel,
         ExpandSquareformParallel,
+        GetDistanceCUDA,
         GetDistanceParallel,
+        GetSquareformCUDA,
         GetSquareformParallel,
+        prepare_mat_streaming,
     )
 except ImportError:
     from .getDistance import (
+        HAS_CUDA,
         ExpandDistanceParallel,
         ExpandSquareformParallel,
+        GetDistanceCUDA,
         GetDistanceParallel,
+        GetSquareformCUDA,
         GetSquareformParallel,
+        prepare_mat_streaming,
     )
 
 logging.basicConfig(format="%(asctime)s | %(message)s", stream=sys.stdout, level=logging.INFO)
@@ -74,33 +81,6 @@ def prep_index(file_to_index, every=10000):
     else:
         raise Exception("Provided file does not exist")
     return True
-
-
-def prepare_mat(profile_file):
-    """
-    Creates a numpy array from a profile file in tab-separated format.
-
-    First row is assumed to contain allele names (columns where the name
-    starts with '#' are omitted). If ST identifiers are numeric, values
-    lower than 0 are ignored. Allele variants with values lower than 0
-    are converted to 0.
-
-    :param profile_file: path to a tab-separated profile file
-    :return: (mat, names) -- mat is np.int32, names are the ST ids
-    """
-    mat = pd.read_csv(profile_file, sep="\t", header=None, dtype=str).values
-    allele_columns = np.array([i == 0 or (not h.startswith("#")) for i, h in enumerate(mat[0])])
-    mat = mat[1:, allele_columns]
-    try:
-        mat = mat.astype(np.int32)
-        mat = mat[mat.T[0] > 0]
-        names = mat.T[0].copy()
-    except ValueError:
-        names = mat.T[0].copy()
-        mat.T[0] = np.arange(1, mat.shape[0] + 1)
-        mat = mat.astype(np.int32)
-    mat[mat < 0] = 0
-    return mat, names
 
 
 def _split_local(rows, row_names):
@@ -168,18 +148,49 @@ def _split_local(rows, row_names):
     multiple=True,
     type=click.Choice(["single", "complete"]),
     default=("single",),
-    help="Linkage criterion(s). Can be specified multiple times to "
-    "run several methods in a single invocation (e.g. "
+    help="Linkage criterion(s). Can be specified multiple times "
+    "to run several methods in a single invocation (e.g. "
     "--clustering_method single --clustering_method complete).",
 )
 @click.option(
     "--clean",
     is_flag=True,
     default=False,
-    help="Force full recalculation from scratch, removing any previous "
-    "run artefacts (dist0.npy, dist1.npy, ordering.npy).",
+    help="Force full recalculation from scratch, removing any "
+    "previous run artefacts (dist0.npy, dist1.npy, ordering.npy).",
 )
-def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
+@click.option(
+    "--gpu-ids",
+    type=int,
+    multiple=True,
+    default=(),
+    help="CUDA GPU device IDs for distance computation. "
+    "When specified, GPU is used and incremental mode is "
+    "disabled.",
+)
+@click.option(
+    "--block-size",
+    type=int,
+    default=100000,
+    help="Tile edge size for GPU computation (default: 100000).",
+)
+@click.option(
+    "--threads-per-block",
+    type=int,
+    nargs=2,
+    default=(16, 16),
+    help="CUDA threads per block (default: 16 16).",
+)
+def phierCC(
+    profile,
+    n_proc,
+    clustering_method,
+    allowed_missing,
+    clean,
+    gpu_ids,
+    block_size,
+    threads_per_block,
+):
     """
     Compute pairwise distances and perform hierarchical clustering.
 
@@ -188,7 +199,17 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
     ordering.npy all exist in the output directory (from a previous
     run), incremental mode is activated: old distances are reused
     and only pairs involving new STs are computed.
+
+    With --gpu-ids, distance matrices are computed on CUDA GPUs
+    (always a full recalculation, no incremental mode).
     """
+
+    if gpu_ids and not HAS_CUDA:
+        logging.error(
+            "--gpu-ids specified but numba.cuda is not available. "
+            "Install numba-cuda or use the CPU path."
+        )
+        sys.exit(1)
 
     output_dir = os.path.dirname(profile)
     if not output_dir:
@@ -204,14 +225,11 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
                 os.remove(f)
                 logging.info(f"--clean: removed {f}")
 
-    # Read profiles file
-    mat, names = prepare_mat(profile_file)
+    # Read profiles file (streaming loader, no pandas)
+    mat, names = prepare_mat_streaming(profile_file)
     n_loci = mat.shape[1] - 1
 
-    # Build a stable lookup from mat row index → original name.
-    # For numeric IDs names == mat.T[0]; for text IDs (e.g. "local_1")
-    # mat.T[0] holds synthetic sequential integers while names keeps the
-    # original strings.  We always use names for tracking between runs.
+    # Build a stable lookup from mat row index -> original name.
     matid_to_name = {int(mat[i, 0]): str(names[i]) for i in range(mat.shape[0])}
 
     # --- Decide: incremental or full mode ---
@@ -231,14 +249,15 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
 
         if old_n > mat.shape[0]:
             logging.warning(
-                f"New profile has fewer STs ({mat.shape[0]}) than previous "
-                f"run ({old_n}). Falling back to full mode."
+                f"New profile has fewer STs ({mat.shape[0]}) than "
+                f"previous run ({old_n}). Falling back to full mode."
             )
         elif old_n == mat.shape[0]:
             if missing_sts:
                 logging.warning(
                     f"{len(missing_sts)} old STs replaced by new ones "
-                    f"(e.g. {missing_sts[:5]}). Falling back to full mode."
+                    f"(e.g. {missing_sts[:5]}). "
+                    f"Falling back to full mode."
                 )
             else:
                 logging.info("Profile unchanged – same STs as previous run. Skipping calculations.")
@@ -246,15 +265,21 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
         else:
             if missing_sts:
                 logging.warning(
-                    f"{len(missing_sts)} old STs missing from new profile "
-                    f"(e.g. {missing_sts[:5]}). Falling back to full mode."
+                    f"{len(missing_sts)} old STs missing from new "
+                    f"profile (e.g. {missing_sts[:5]}). "
+                    f"Falling back to full mode."
+                )
+            elif gpu_ids:
+                logging.info(
+                    "GPU mode: skipping incremental detection (always full recalculation)."
                 )
             else:
                 expected_size = old_n * (old_n - 1) // 2
                 probe = np.load(numpy_dist0_out, mmap_mode="r", allow_pickle=True)
                 if probe.shape[0] != expected_size:
                     logging.warning(
-                        f"Old dist0 size {probe.shape[0]} != expected {expected_size}. "
+                        f"Old dist0 size {probe.shape[0]} != "
+                        f"expected {expected_size}. "
                         f"Falling back to full mode."
                     )
                     del probe
@@ -299,7 +324,10 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
         ordered_names = pub_names + loc_names
 
     np.save(
-        ordering_path, np.array(ordered_names, dtype=object), allow_pickle=True, fix_imports=True
+        ordering_path,
+        np.array(ordered_names, dtype=object),
+        allow_pickle=True,
+        fix_imports=True,
     )
 
     logging.info(
@@ -311,7 +339,18 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
 
     # ---- Distance matrix 0 (condensed / squareform) ----
 
-    if incremental:
+    if gpu_ids:
+        logging.info(f"Calculate distance matrix 0 (GPU, devices {list(gpu_ids)})")
+        dist = GetSquareformCUDA(
+            mat,
+            tuple(gpu_ids),
+            allowed_missing,
+            block_size,
+            tuple(threads_per_block),
+            output_path=numpy_dist0_out,
+        )
+        logging.info(f"Saved distance matrix 0 to {numpy_dist0_out}")
+    elif incremental:
         logging.info("Expanding distance matrix 0 (incremental)")
         dist = ExpandSquareformParallel(numpy_dist0_out, old_n, mat, n_proc, allowed_missing)
         logging.info(f"Saving distance matrix 0 to {numpy_dist0_out}")
@@ -339,7 +378,10 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
         descendents = [[m] for m in mat.T[0]] + [None for _ in np.arange(mat.shape[0] - 1)]
         for idx, c in enumerate(slc.astype(int)):
             n_id = idx + mat.shape[0]
-            d = sorted([int(c[0]), int(c[1])], key=lambda x: descendents[x][0])
+            d = sorted(
+                [int(c[0]), int(c[1])],
+                key=lambda x: descendents[x][0],
+            )
             min_id = min(descendents[d[0]])
             descendents[n_id] = descendents[d[0]] + descendents[d[1]]
             for tgt in descendents[d[1]]:
@@ -351,9 +393,27 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
 
     # ---- Phase 2: attach genomes and save (uses dist1) ----
 
-    if incremental:
+    if gpu_ids:
+        logging.info(f"Calculate distance matrix 1 (GPU, devices {list(gpu_ids)})")
+        dist = GetDistanceCUDA(
+            mat,
+            tuple(gpu_ids),
+            allowed_missing,
+            block_size,
+            tuple(threads_per_block),
+            output_path=numpy_dist1_out,
+        )
+        logging.info(f"Saved distance matrix 1 to {numpy_dist1_out}")
+    elif incremental:
         logging.info("Expanding distance matrix 1 (incremental)")
-        dist = ExpandDistanceParallel(numpy_dist1_out, old_n, mat, n_proc, allowed_missing, depth=1)
+        dist = ExpandDistanceParallel(
+            numpy_dist1_out,
+            old_n,
+            mat,
+            n_proc,
+            allowed_missing,
+            depth=1,
+        )
         logging.info(f"Saving distance matrix 1 to {numpy_dist1_out}")
         np.save(numpy_dist1_out, dist, allow_pickle=True, fix_imports=True)
     else:
@@ -375,12 +435,13 @@ def phierCC(profile, n_proc, clustering_method, allowed_missing, clean):
         res.T[0] = mat.T[0]
         res = res[np.argsort(res.T[0])]
 
-        with gzip.open(f"{output_dir}/profile_{method}_linkage.HierCC.gz", "wt") as fout:
+        out_path = f"{output_dir}/profile_{method}_linkage.HierCC.gz"
+        with gzip.open(out_path, "wt") as fout:
             hc_cols = "\t".join("HC" + str(i) for i in np.arange(n_loci + 1))
             fout.write(f"#ST_id\t{hc_cols}\n")
             for n, r in zip(names, res):
                 fout.write("\t".join([str(n)] + [str(rr) for rr in r[1:]]) + "\n")
-        prep_index(f"{output_dir}/profile_{method}_linkage.HierCC.gz")
+        prep_index(out_path)
         logging.info(f"Saving clustering results to profile_{method}_linkage.HierCC.gz")
 
     del dist

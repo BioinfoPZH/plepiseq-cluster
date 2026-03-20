@@ -8,6 +8,10 @@ set -euo pipefail
 ### and only pairs involving new STs are computed. Pass --clean to force a
 ### full recalculation from scratch.
 ###
+### When --gpu-ids is provided, distance matrices are computed on CUDA GPUs
+### (always a full recalculation). The Docker container is started with
+### --gpus to expose the requested devices.
+###
 ### Results are published as a GitHub Release (requires gh CLI).
 ###
 ### --image_name  Docker image name with tag built from the provided Dockerfile
@@ -16,29 +20,40 @@ set -euo pipefail
 ###               are preserved across runs unless --clean is passed.
 ### --cpus        Number of threads for Numba parallel distance computation
 ### --clean       Force full recalculation (removes cached distance matrices)
+### --gpu-ids     Space-separated CUDA device IDs (e.g. "0 1 2 3") or "all"
+###               to auto-detect. When set, GPU acceleration is used and
+###               --cpus controls only clustering.
+### --block-size  Tile edge size for GPU computation (default: 100000)
 ###
 ### Script will crash if machine has less than 600 Gb of RAM
-### Example:
+### Example (CPU):
 ### ./tools/run_clustering.sh --output_dir /mnt/raid/michall/pHierCC \
-###     --image_name "phiercc_custom:2.0" --cpus 250
+###     --image_name "plepiseq-cluster:3.0" --cpus 250
+### Example (GPU):
+### ./tools/run_clustering.sh --output_dir /mnt/raid/michall/pHierCC \
+###     --image_name "plepiseq-cluster:3.0" --cpus 1 --gpu-ids "0 1 2 3"
 
 output_dir=""
 image_name=""
 cpus=1
 clean=false
+gpu_ids=""
+block_size=""
 
 function show_help() {
-    echo "Usage: $0 --output_dir <path> --image_name <string> --cpus <int> [--clean]"
+    echo "Usage: $0 --output_dir <path> --image_name <string> --cpus <int> [--clean] [--gpu-ids \"0 1 ...\"] [--block-size N]"
     echo ""
     echo "Options:"
     echo "  --output_dir   Path to top-level directory for calculations"
     echo "  --image_name   Docker image name:tag built from the Dockerfile"
     echo "  --cpus         Number of CPUs/threads (default: 1)"
     echo "  --clean        Force full recalculation (remove cached .npy files)"
+    echo "  --gpu-ids      GPU device IDs (e.g. \"0 1 2 3\") or \"all\" to auto-detect"
+    echo "  --block-size   Tile edge size for GPU computation (default: 100000)"
     echo "  -h, --help     Show this help message"
 }
 
-OPTIONS=$(getopt -o h --long output_dir:,image_name:,cpus:,clean,help -- "$@")
+OPTIONS=$(getopt -o h --long output_dir:,image_name:,cpus:,clean,gpu-ids:,block-size:,help -- "$@")
 eval set -- "$OPTIONS"
 
 if [[ $# -eq 1 ]]; then
@@ -64,6 +79,14 @@ while true; do
         --clean)
             clean=true
             shift
+            ;;
+        --gpu-ids)
+            gpu_ids="$2"
+            shift 2
+            ;;
+        --block-size)
+            block_size="$2"
+            shift 2
             ;;
         -h|--help)
             show_help
@@ -114,6 +137,54 @@ fi
 if ! command -v gh &>/dev/null; then
     echo "Error: gh CLI not found. Install it from https://cli.github.com/"
     exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve --gpu-ids "all" to actual device IDs via nvidia-smi
+# ---------------------------------------------------------------------------
+gpu_all=false
+if [[ "$gpu_ids" == "all" ]]; then
+    gpu_all=true
+    if ! command -v nvidia-smi &>/dev/null; then
+        echo "Error: --gpu-ids all requires nvidia-smi to detect devices."
+        exit 1
+    fi
+    n_gpus=$(nvidia-smi --list-gpus | wc -l)
+    if [[ "$n_gpus" -lt 1 ]]; then
+        echo "Error: nvidia-smi found 0 GPUs."
+        exit 1
+    fi
+    gpu_ids=$(seq -s ' ' 0 $((n_gpus - 1)))
+    echo "Detected ${n_gpus} GPUs: ${gpu_ids}"
+fi
+
+# ---------------------------------------------------------------------------
+# Build pHierCC GPU args (passed inside docker run) -- bash array
+# ---------------------------------------------------------------------------
+phiercc_gpu_args=()
+if [[ -n "$gpu_ids" ]]; then
+    for gid in $gpu_ids; do
+        phiercc_gpu_args+=(--gpu-ids "$gid")
+    done
+    if [[ -n "$block_size" ]]; then
+        phiercc_gpu_args+=(--block-size "$block_size")
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Build docker GPU args (passed to docker run itself) -- bash array
+# Use --gpus all when user requested "all" to avoid the NVIDIA runtime
+# "cannot set both Count and DeviceIDs" error that occurs when all
+# device IDs are enumerated explicitly.
+# ---------------------------------------------------------------------------
+docker_gpu_args=()
+if [[ -n "$gpu_ids" ]]; then
+    if [[ "$gpu_all" == true ]]; then
+        docker_gpu_args+=(--gpus all)
+    else
+        device_list=$(echo "$gpu_ids" | tr ' ' ',')
+        docker_gpu_args+=(--gpus "device=${device_list}")
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -174,14 +245,27 @@ for species in Campylobacter Escherichia Salmonella; do
     fi
 
     echo "Running clustering for ${species} on ${cpus} CPUs"
+
+    cmd=(docker run --rm)
+    if [[ -n "$gpu_ids" ]]; then
+        cmd+=("${docker_gpu_args[@]}")
+    else
+        cmd+=(--ulimit nofile=262144:262144)
+    fi
+    cmd+=(--volume "${output}/${species}/:/dane:rw")
+    cmd+=(--user "$(id -u):$(id -g)")
+    cmd+=("${image_name}")
+    cmd+=(--profile "/dane/${profile_file}" -n "${cpus}")
+    cmd+=(--clustering_method single --clustering_method complete)
+    if [[ -n "$clean_flag" ]]; then
+        cmd+=("$clean_flag")
+    fi
+    if [[ ${#phiercc_gpu_args[@]} -gt 0 ]]; then
+        cmd+=("${phiercc_gpu_args[@]}")
+    fi
+
     set +e
-    docker run --rm \
-           --volume "${output}/${species}/:/dane:rw" \
-           --user "$(id -u):$(id -g)" \
-           --ulimit nofile=262144:262144 \
-           ${image_name} --profile "/dane/${profile_file}" -n ${cpus} \
-           --clustering_method single --clustering_method complete \
-           ${clean_flag}
+    "${cmd[@]}"
     rc=$?
     set -e
 
