@@ -237,6 +237,7 @@ fi
 # should be created.
 # ---------------------------------------------------------------------------
 any_updated=false
+any_failed=false
 
 for species in Campylobacter Escherichia Salmonella; do
     profile_file="profiles.list.gz"
@@ -277,14 +278,76 @@ for species in Campylobacter Escherichia Salmonella; do
         exit "$rc"
     fi
 
+    # -------------------------------------------------------------------
+    # Validate output files before marking this species as successful.
+    # A truncated .gz or mismatched line count means the run produced
+    # corrupt output. In that case we remove ordering.npy so the next
+    # run won't skip, and we exclude this species from the release.
+    # -------------------------------------------------------------------
+    species_dir="${output}/${species}"
+    profile_path="${species_dir}/${profile_file}"
+
+    # Count expected STs from the input profile (lines minus header)
+    if [[ "$profile_file" == *.gz ]]; then
+        expected_sts=$(zcat "$profile_path" | wc -l)
+    else
+        expected_sts=$(wc -l < "$profile_path")
+    fi
+    expected_sts=$((expected_sts - 1))  # subtract header
+
+    validation_ok=true
+    for gz in "${species_dir}"/*_linkage.HierCC.gz; do
+        basename_gz=$(basename "$gz")
+
+        # 1. File must exist and be non-empty
+        if [ ! -s "$gz" ]; then
+            echo "VALIDATION FAILED: ${species}/${basename_gz} is missing or empty"
+            validation_ok=false
+            continue
+        fi
+
+        # 2. gzip integrity check
+        if ! gzip -t "$gz" 2>/dev/null; then
+            echo "VALIDATION FAILED: ${species}/${basename_gz} is a truncated/corrupt gzip"
+            validation_ok=false
+            continue
+        fi
+
+        # 3. Line count must match expected STs (data lines = header + STs)
+        actual_lines=$(zcat "$gz" | wc -l)
+        actual_sts=$((actual_lines - 1))  # subtract #ST_id header
+        if [ "$actual_sts" -ne "$expected_sts" ]; then
+            echo "VALIDATION FAILED: ${species}/${basename_gz} has ${actual_sts} STs, expected ${expected_sts}"
+            validation_ok=false
+        fi
+
+        # 4. Corresponding .index file must exist
+        idx="${gz%.gz}.index"
+        if [ ! -s "$idx" ]; then
+            echo "VALIDATION FAILED: ${species}/$(basename "$idx") is missing or empty"
+            validation_ok=false
+        fi
+    done
+
+    if [ "$validation_ok" = false ]; then
+        echo "WARNING: Output validation failed for ${species}. Removing ordering.npy to force recalculation next run."
+        rm -f "${species_dir}/ordering.npy"
+        any_failed=true
+        continue
+    fi
+
     any_updated=true
-    echo "Finished calculations for ${species}"
+    echo "Finished calculations for ${species} (${expected_sts} STs validated)"
 done
 
 # ---------------------------------------------------------------------------
-# Publish results as a GitHub Release (only if at least one species updated)
+# Publish results as a GitHub Release (only if at least one species updated
+# AND none failed validation)
 # ---------------------------------------------------------------------------
-if [ "$any_updated" = true ]; then
+if [ "$any_failed" = true ]; then
+    echo "WARNING: One or more species failed output validation. Skipping release."
+    exit 1
+elif [ "$any_updated" = true ]; then
     echo "Publishing results as GitHub Release v${TIMESTAMP}"
 
     release_dir=$(mktemp -d)
