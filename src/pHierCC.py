@@ -58,28 +58,61 @@ logging.basicConfig(format="%(asctime)s | %(message)s", stream=sys.stdout, level
 
 def prep_index(file_to_index, every=10000):
     """
-    Text file with information where data regarding clustering of a given ST starts
-    in a gz file. The index contain information about every 10,000 ST
-    @param file_to_index:
-    @type file_to_index:
-    @param every:
-    @type every:
-    @return:
-    @rtype:
+    Build a sidecar ``.index`` for a HierCC ``.gz`` output file.
+
+    Index format (hybrid sparse / dense):
+
+    - Numeric segment: sparse checkpoints every ``every`` rows (default 10,000),
+      identical to the historical behaviour.
+    - Sentinel row ``__LOCAL_START__\\t<offset>`` is written exactly once. Its
+      offset points to the first ``local_*`` row in the decompressed stream.
+    - Local segment: one dense entry per ``local_*`` row.
+
+    If the file contains no ``local_*`` STs, the sentinel is emitted once at
+    the end with ``offset`` equal to the decompressed file size (EOF), so
+    consumers can always rely on its presence.
+
+    All offsets are byte positions in the *decompressed* gzip stream and point
+    to the start of the corresponding line (suitable for ``gzip.open(...).seek``).
+
+    :param file_to_index: path to the ``.HierCC.gz`` file to be indexed.
+    :param every: checkpoint interval for the numeric segment.
     """
-    if os.path.exists(file_to_index):
-        output_file = file_to_index.replace(".gz", "")
-        with open(f"{output_file}.index", "w") as f, gzip.open(file_to_index) as f2:
-            i = 0
-            length = 0
-            for line in f2:
-                if (i % every) == 0:
-                    elementy = [x.decode("utf-8", errors="replace") for x in line.split()]
-                    f.write(f"{elementy[0]}\t{length}\n")
-                length += len(line)
-                i += 1
-    else:
+    if not os.path.exists(file_to_index):
         raise Exception("Provided file does not exist")
+
+    output_file = file_to_index.replace(".gz", "")
+    with open(f"{output_file}.index", "w") as f, gzip.open(file_to_index) as f2:
+        i = 0
+        length = 0
+        in_local = False
+        sentinel_written = False
+
+        for line in f2:
+            decoded = line.decode("utf-8", errors="replace")
+            if "\t" in decoded:
+                first = decoded.split("\t", 1)[0]
+            else:
+                first = decoded.split(None, 1)[0]
+
+            is_local = first.startswith("local_")
+
+            if is_local and not in_local:
+                f.write(f"__LOCAL_START__\t{length}\n")
+                sentinel_written = True
+                in_local = True
+
+            if in_local:
+                f.write(f"{first}\t{length}\n")
+            elif (i % every) == 0:
+                f.write(f"{first}\t{length}\n")
+
+            length += len(line)
+            i += 1
+
+        if not sentinel_written:
+            f.write(f"__LOCAL_START__\t{length}\n")
+
     return True
 
 
@@ -228,6 +261,29 @@ def phierCC(
     # Read profiles file (streaming loader, no pandas)
     mat, names = prepare_mat_streaming(profile_file)
     n_loci = mat.shape[1] - 1
+
+    # Non-fatal layout diagnostics. The write loop and the .HierCC.index
+    # contract assume the input profile is segmented (numeric STs first
+    # in ascending order, then local_* STs). Warn if that contract is
+    # violated so upstream regressions show up in logs. See issue #8.
+    first_local_idx = next(
+        (i for i, nm in enumerate(names) if str(nm).startswith("local_")),
+        None,
+    )
+    if first_local_idx is not None and any(
+        not str(nm).startswith("local_") for nm in names[first_local_idx + 1 :]
+    ):
+        logging.warning(
+            "Profile layout not segmented: numeric STs appear after local_* STs "
+            "(see issue #8, bug 2). Caller should emit numeric block first, "
+            "then local_* block."
+        )
+    numeric_nums = [int(nm) for nm in names if str(nm).isdigit()]
+    if numeric_nums != sorted(numeric_nums):
+        logging.warning(
+            "Numeric ST block is not ascending; output will be re-sorted "
+            "by ST id (see issue #8, bug 1)."
+        )
 
     # Build a stable lookup from mat row index -> original name.
     matid_to_name = {int(mat[i, 0]): str(names[i]) for i in range(mat.shape[0])}
@@ -433,13 +489,15 @@ def phierCC(
                     r[min_d + 1 :] = res[i, min_d + 1 :]
 
         res.T[0] = mat.T[0]
-        res = res[np.argsort(res.T[0])]
+        order = np.argsort(res.T[0])
+        res = res[order]
+        sorted_names = [names[i] for i in order]
 
         out_path = f"{output_dir}/profile_{method}_linkage.HierCC.gz"
         with gzip.open(out_path, "wt") as fout:
             hc_cols = "\t".join("HC" + str(i) for i in np.arange(n_loci + 1))
             fout.write(f"#ST_id\t{hc_cols}\n")
-            for n, r in zip(names, res):
+            for n, r in zip(sorted_names, res):
                 fout.write("\t".join([str(n)] + [str(rr) for rr in r[1:]]) + "\n")
         prep_index(out_path)
         logging.info(f"Saving clustering results to profile_{method}_linkage.HierCC.gz")

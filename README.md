@@ -201,6 +201,50 @@ The `--gpus` flag exposes host GPUs to the container; the `--gpu-ids` flags tell
 
 ---
 
+## Weekly automation wrapper
+
+`tools/run_clustering.sh` downloads external profiles for Salmonella, Escherichia, and Campylobacter, optionally merges in a per-species **local** profile, runs pHierCC in Docker for each species, validates the output, and (if any species was updated) publishes a GitHub Release.
+
+### Example
+
+```bash
+./tools/run_clustering.sh \
+    --output_dir /mnt/raid/pHierCC \
+    --image_name plepiseq-cluster:latest \
+    --cpus 8 \
+    --gpu-ids all \
+    --salmonella-local    /path/to/salmonella_local.list \
+    --escherichia-local   /path/to/escherichia_local.list \
+    --campylobacter-local /path/to/campylobacter_local.list
+```
+
+### Wrapper options (in addition to the pHierCC options above)
+
+| Option | Description |
+|---|---|
+| `--output_dir PATH` | Top-level working directory (one subdirectory per species) |
+| `--image_name NAME:TAG` | Docker image built from the repo Dockerfile |
+| `--cpus N` | Number of CPUs/threads passed to pHierCC |
+| `--clean` | Force full recalculation (clears cached distance matrices) |
+| `--gpu-ids "0 1 2" / all` | Enable GPU distance computation (same semantics as pHierCC's `--gpu-ids`) |
+| `--block-size N` | GPU tile edge size |
+| `--salmonella-local PATH` | Optional plain-text local profile merged into the Salmonella run |
+| `--escherichia-local PATH` | Optional plain-text local profile merged into the Escherichia run |
+| `--campylobacter-local PATH` | Optional plain-text local profile merged into the Campylobacter run |
+
+### External + local profile merge
+
+Each local profile must be tab-separated with a header row **identical** to the external download and data rows whose first column matches `^local_[0-9]+$`. The wrapper:
+
+1. Downloads the external profile to `profiles_external.list[.gz]` (one retry after 300 s on failure).
+2. Copies the local profile to `profiles_local.list`.
+3. Validates the local header matches the external header and every local row is `local_<int>`.
+4. Emits a segmented `profiles.list[.gz]` -- external numeric STs ascending, then local rows ascending by suffix. This is the file pHierCC reads.
+
+If no local flag is given for a species, step 4 still produces `profiles.list[.gz]` from the external download alone. All staging files (`profiles_external.list[.gz]`, `profiles_local.list`) are cleared at the start of each run and again on `--clean`.
+
+---
+
 ## Clustering results (GitHub Releases)
 
 Pre-computed weekly clustering results for Salmonella, Escherichia, and Campylobacter are published as GitHub Release assets. To download the latest results:
