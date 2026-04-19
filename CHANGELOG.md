@@ -1,6 +1,13 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-04-18
+### Added
+- `tools/run_clustering.sh`: three optional per-species local-profile flags (`--salmonella-local`, `--escherichia-local`, `--campylobacter-local`). Each accepts a tab-separated plain-text profile with a header matching the external download and rows whose first column matches `^local_[0-9]+$`.
+- `tools/run_clustering.sh`: `retry_download` helper retries each external download once after 300 s before aborting the whole run with exit code 1.
+- `tools/run_clustering.sh`: merge step that writes a segmented `profiles.list[.gz]` (external numeric STs ascending, then `local_*` rows ascending by suffix). Raw download is staged as `profiles_external.list[.gz]` and the optional local copy as `profiles_local.list`; both are cleaned up on re-run and on `--clean`. Prevents issue #8 bug 2 by construction.
+- `src/pHierCC.py`: non-fatal `logging.warning` if the loaded profile violates the segmented layout (numeric STs after `local_*` STs, or a non-ascending numeric block). Purely diagnostic; behaviour unchanged.
+
 ## [0.3.2] - 2026-04-18
 ### Fixed
 - `.HierCC.gz` write loop now applies the same permutation to `names` that it applies to `res` via `np.argsort(res.T[0])`. Previously, for profiles not already sorted ascending by numeric ST id, the `#ST_id` column was written in input order while the HC columns were written in ST-id-ascending order, silently misaligning labels and clustering data. Output is byte-identical for pre-sorted inputs (the production case). See issue #8, bug 1 (inherited from upstream pHierCC).

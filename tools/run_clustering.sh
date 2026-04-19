@@ -39,21 +39,27 @@ cpus=1
 clean=false
 gpu_ids=""
 block_size=""
+salmonella_local=""
+escherichia_local=""
+campylobacter_local=""
 
 function show_help() {
-    echo "Usage: $0 --output_dir <path> --image_name <string> --cpus <int> [--clean] [--gpu-ids \"0 1 ...\"] [--block-size N]"
+    echo "Usage: $0 --output_dir <path> --image_name <string> --cpus <int> [--clean] [--gpu-ids \"0 1 ...\"] [--block-size N] [--salmonella-local PATH] [--escherichia-local PATH] [--campylobacter-local PATH]"
     echo ""
     echo "Options:"
-    echo "  --output_dir   Path to top-level directory for calculations"
-    echo "  --image_name   Docker image name:tag built from the Dockerfile"
-    echo "  --cpus         Number of CPUs/threads (default: 1)"
-    echo "  --clean        Force full recalculation (remove cached .npy files)"
-    echo "  --gpu-ids      GPU device IDs (e.g. \"0 1 2 3\") or \"all\" to auto-detect"
-    echo "  --block-size   Tile edge size for GPU computation (default: 100000)"
-    echo "  -h, --help     Show this help message"
+    echo "  --output_dir           Path to top-level directory for calculations"
+    echo "  --image_name           Docker image name:tag built from the Dockerfile"
+    echo "  --cpus                 Number of CPUs/threads (default: 1)"
+    echo "  --clean                Force full recalculation (remove cached .npy files)"
+    echo "  --gpu-ids              GPU device IDs (e.g. \"0 1 2 3\") or \"all\" to auto-detect"
+    echo "  --block-size           Tile edge size for GPU computation (default: 100000)"
+    echo "  --salmonella-local     Path to plain-text Salmonella local_* profile (optional)"
+    echo "  --escherichia-local    Path to plain-text Escherichia local_* profile (optional)"
+    echo "  --campylobacter-local  Path to plain-text Campylobacter local_* profile (optional)"
+    echo "  -h, --help             Show this help message"
 }
 
-OPTIONS=$(getopt -o h --long output_dir:,image_name:,cpus:,clean,gpu-ids:,block-size:,help -- "$@")
+OPTIONS=$(getopt -o h --long output_dir:,image_name:,cpus:,clean,gpu-ids:,block-size:,salmonella-local:,escherichia-local:,campylobacter-local:,help -- "$@")
 eval set -- "$OPTIONS"
 
 if [[ $# -eq 1 ]]; then
@@ -86,6 +92,18 @@ while true; do
             ;;
         --block-size)
             block_size="$2"
+            shift 2
+            ;;
+        --salmonella-local)
+            salmonella_local="$2"
+            shift 2
+            ;;
+        --escherichia-local)
+            escherichia_local="$2"
+            shift 2
+            ;;
+        --campylobacter-local)
+            campylobacter_local="$2"
             shift 2
             ;;
         -h|--help)
@@ -188,6 +206,24 @@ if [[ -n "$gpu_ids" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Map species -> user-supplied local profile path (empty = none)
+# ---------------------------------------------------------------------------
+declare -A local_profile=(
+    [Salmonella]="$salmonella_local"
+    [Escherichia]="$escherichia_local"
+    [Campylobacter]="$campylobacter_local"
+)
+
+# Validate any provided local files exist and are readable
+for species in Salmonella Escherichia Campylobacter; do
+    local_src="${local_profile[$species]}"
+    if [[ -n "$local_src" && ! -r "$local_src" ]]; then
+        echo "Error: --${species,,}-local path does not exist or is not readable: $local_src"
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Prepare output directories
 # ---------------------------------------------------------------------------
 output=$(realpath "${output_dir}")
@@ -196,8 +232,13 @@ for species in Salmonella Escherichia Campylobacter; do
     if [ ! -d "${output}/${species}" ]; then
         mkdir -p "${output}/${species}"
     else
-        # Remove old profile downloads (new ones will be fetched below)
+        # Remove old profile downloads and staging files (fresh copies
+        # will be produced below). profiles.list[.gz] = post-merge file
+        # consumed by pHierCC; profiles_external.list[.gz] = raw download;
+        # profiles_local.list = copy of the user-supplied local profile.
         rm -f "${output}/${species}"/profiles.list*
+        rm -f "${output}/${species}"/profiles_external.list*
+        rm -f "${output}/${species}"/profiles_local.list
 
         if [ "$clean" = true ]; then
             echo "--clean: removing cached distance matrices for ${species}"
@@ -214,11 +255,144 @@ if [ ! -w "$output" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Download profiles
+# Download external profiles (retry once after 300 seconds on failure)
 # ---------------------------------------------------------------------------
-wget -O "${output}/Salmonella/profiles.list.gz"  "https://enterobase.warwick.ac.uk//schemes/Salmonella.cgMLSTv2/profiles.list.gz"
-wget -O "${output}/Escherichia/profiles.list.gz" "https://enterobase.warwick.ac.uk//schemes/Escherichia.cgMLSTv1/profiles.list.gz"
-python3 tools/download_profile_Campylo.py -o "${output}/Campylobacter/profiles.list"
+retry_download() {
+    local label="$1"; shift
+    local wait_s=300
+    if ! "$@"; then
+        echo "WARNING: ${label} download failed; retrying in ${wait_s}s"
+        sleep "${wait_s}"
+        if ! "$@"; then
+            echo "ERROR: ${label} download failed after retry"
+            return 1
+        fi
+    fi
+}
+
+retry_download "Salmonella" \
+    wget -q --tries=1 --timeout=60 \
+    -O "${output}/Salmonella/profiles_external.list.gz" \
+    "https://enterobase.warwick.ac.uk//schemes/Salmonella.cgMLSTv2/profiles.list.gz" \
+    || exit 1
+retry_download "Escherichia" \
+    wget -q --tries=1 --timeout=60 \
+    -O "${output}/Escherichia/profiles_external.list.gz" \
+    "https://enterobase.warwick.ac.uk//schemes/Escherichia.cgMLSTv1/profiles.list.gz" \
+    || exit 1
+retry_download "Campylobacter" \
+    python3 tools/download_profile_Campylo.py \
+    -o "${output}/Campylobacter/profiles_external.list" \
+    || exit 1
+
+# ---------------------------------------------------------------------------
+# Merge external + (optional) local profile into the segmented
+# profiles.list[.gz] that pHierCC will consume.
+#
+# Contract: numeric STs first in ascending order, then local_* STs in
+# ascending suffix order. This avoids issue #8 / bug 2 (mixed/interleaved
+# inputs produce broken .HierCC.index segmentation).
+# ---------------------------------------------------------------------------
+read_profile() {
+    local path="$1"
+    if [[ "$path" == *.gz ]]; then
+        zcat "$path"
+    else
+        cat "$path"
+    fi
+}
+
+prepare_profile() {
+    local species="$1"
+    local species_dir="${output}/${species}"
+    local local_src="${local_profile[$species]}"
+
+    local external_path="${species_dir}/profiles_external.list.gz"
+    local final_path="${species_dir}/profiles.list.gz"
+    if [ "$species" = "Campylobacter" ]; then
+        external_path="${species_dir}/profiles_external.list"
+        final_path="${species_dir}/profiles.list"
+    fi
+
+    local ext_header
+    ext_header=$(read_profile "$external_path" | head -n 1)
+    if [ -z "$ext_header" ]; then
+        echo "ERROR: external profile for ${species} is empty (${external_path})"
+        exit 1
+    fi
+
+    local tmp_body
+    tmp_body=$(mktemp)
+
+    local local_is_header_only=false
+    if [ -n "$local_src" ]; then
+        # Reject empty files early: 0 bytes is almost always a broken upstream
+        # export. A header-only file, in contrast, is a legitimate "no new
+        # local STs this week" state and only warrants a warning.
+        if [ ! -s "$local_src" ]; then
+            echo "ERROR: ${species} local profile is empty (${local_src})"
+            rm -f "$tmp_body"
+            exit 1
+        fi
+
+        cp "$local_src" "${species_dir}/profiles_local.list"
+        local local_path="${species_dir}/profiles_local.list"
+
+        local loc_header
+        loc_header=$(head -n 1 "$local_path")
+        if [ "$loc_header" != "$ext_header" ]; then
+            echo "ERROR: header mismatch between external and local profile for ${species}"
+            echo "  external: ${ext_header:0:120}..."
+            echo "  local:    ${loc_header:0:120}..."
+            rm -f "$tmp_body"
+            exit 1
+        fi
+
+        local loc_data_rows
+        loc_data_rows=$(($(wc -l < "$local_path") - 1))
+        if [ "$loc_data_rows" -le 0 ]; then
+            echo "WARNING: ${species} local profile has only a header, no local_* rows (${local_src}); proceeding with external profile only"
+            local_is_header_only=true
+        else
+            local bad_row
+            bad_row=$(tail -n +2 "$local_path" \
+                | awk -F'\t' '$1 !~ /^local_[0-9]+$/ {print NR": "$1; exit}')
+            if [ -n "$bad_row" ]; then
+                echo "ERROR: ${species} local profile contains non-local_* ST at data row ${bad_row}"
+                rm -f "$tmp_body"
+                exit 1
+            fi
+        fi
+    fi
+
+    # Header + external rows (numeric-ascending) + local rows (local_N ascending)
+    printf '%s\n' "$ext_header" > "$tmp_body"
+    read_profile "$external_path" | tail -n +2 | sort -t$'\t' -k1,1n >> "$tmp_body"
+
+    local n_ext n_loc=0
+    n_ext=$(($(read_profile "$external_path" | wc -l) - 1))
+
+    if [ -n "$local_src" ] && [ "$local_is_header_only" = false ]; then
+        local local_path="${species_dir}/profiles_local.list"
+        tail -n +2 "$local_path" | sort -t_ -k2,2n >> "$tmp_body"
+        n_loc=$(($(wc -l < "$local_path") - 1))
+    fi
+
+    local n_total=$((n_ext + n_loc))
+
+    if [[ "$final_path" == *.gz ]]; then
+        gzip -n -c "$tmp_body" > "$final_path"
+        rm -f "$tmp_body"
+    else
+        mv "$tmp_body" "$final_path"
+    fi
+
+    echo "Prepared ${species} profile: ${n_ext} external + ${n_loc} local = ${n_total} STs"
+}
+
+for species in Salmonella Escherichia Campylobacter; do
+    prepare_profile "$species"
+done
 
 TIMESTAMP=$(date +%Y-%m-%d)
 

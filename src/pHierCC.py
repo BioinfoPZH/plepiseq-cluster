@@ -262,6 +262,29 @@ def phierCC(
     mat, names = prepare_mat_streaming(profile_file)
     n_loci = mat.shape[1] - 1
 
+    # Non-fatal layout diagnostics. The write loop and the .HierCC.index
+    # contract assume the input profile is segmented (numeric STs first
+    # in ascending order, then local_* STs). Warn if that contract is
+    # violated so upstream regressions show up in logs. See issue #8.
+    first_local_idx = next(
+        (i for i, nm in enumerate(names) if str(nm).startswith("local_")),
+        None,
+    )
+    if first_local_idx is not None and any(
+        not str(nm).startswith("local_") for nm in names[first_local_idx + 1 :]
+    ):
+        logging.warning(
+            "Profile layout not segmented: numeric STs appear after local_* STs "
+            "(see issue #8, bug 2). Caller should emit numeric block first, "
+            "then local_* block."
+        )
+    numeric_nums = [int(nm) for nm in names if str(nm).isdigit()]
+    if numeric_nums != sorted(numeric_nums):
+        logging.warning(
+            "Numeric ST block is not ascending; output will be re-sorted "
+            "by ST id (see issue #8, bug 1)."
+        )
+
     # Build a stable lookup from mat row index -> original name.
     matid_to_name = {int(mat[i, 0]): str(names[i]) for i in range(mat.shape[0])}
 
