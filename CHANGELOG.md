@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-03-13
+### Changed
+- Extend `.HierCC.index` format with a dense `local_*` segment and an `__LOCAL_START__` sentinel separator. Pure-numeric files gain a trailing sentinel at EOF; the existing sparse numeric checkpoints are unchanged.
+
 ## [0.3.0] - 2026-03-18
 ### Added
 - Multi-GPU CUDA acceleration for distance matrix computation
