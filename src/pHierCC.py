@@ -466,13 +466,15 @@ def phierCC(
                     r[min_d + 1 :] = res[i, min_d + 1 :]
 
         res.T[0] = mat.T[0]
-        res = res[np.argsort(res.T[0])]
+        order = np.argsort(res.T[0])
+        res = res[order]
+        sorted_names = [names[i] for i in order]
 
         out_path = f"{output_dir}/profile_{method}_linkage.HierCC.gz"
         with gzip.open(out_path, "wt") as fout:
             hc_cols = "\t".join("HC" + str(i) for i in np.arange(n_loci + 1))
             fout.write(f"#ST_id\t{hc_cols}\n")
-            for n, r in zip(names, res):
+            for n, r in zip(sorted_names, res):
                 fout.write("\t".join([str(n)] + [str(rr) for rr in r[1:]]) + "\n")
         prep_index(out_path)
         logging.info(f"Saving clustering results to profile_{method}_linkage.HierCC.gz")

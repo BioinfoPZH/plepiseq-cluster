@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-04-18
+### Fixed
+- `.HierCC.gz` write loop now applies the same permutation to `names` that it applies to `res` via `np.argsort(res.T[0])`. Previously, for profiles not already sorted ascending by numeric ST id, the `#ST_id` column was written in input order while the HC columns were written in ST-id-ascending order, silently misaligning labels and clustering data. Output is byte-identical for pre-sorted inputs (the production case). See issue #8, bug 1 (inherited from upstream pHierCC).
+
 ## [0.3.1] - 2026-03-13
 ### Changed
 - Extend `.HierCC.index` format with a dense `local_*` segment and an `__LOCAL_START__` sentinel separator. Pure-numeric files gain a trailing sentinel at EOF; the existing sparse numeric checkpoints are unchanged.
