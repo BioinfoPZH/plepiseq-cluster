@@ -33,6 +33,7 @@ from scipy.cluster.hierarchy import linkage
 try:
     from getDistance import (
         HAS_CUDA,
+        LOCAL_OFFSET,
         ExpandDistanceParallel,
         ExpandSquareformParallel,
         GetDistanceCUDA,
@@ -44,6 +45,7 @@ try:
 except ImportError:
     from .getDistance import (
         HAS_CUDA,
+        LOCAL_OFFSET,
         ExpandDistanceParallel,
         ExpandSquareformParallel,
         GetDistanceCUDA,
@@ -491,14 +493,31 @@ def phierCC(
         res.T[0] = mat.T[0]
         order = np.argsort(res.T[0])
         res = res[order]
-        sorted_names = [names[i] for i in order]
+        # IMPORTANT: index into ordered_names, not names. `_split_local`
+        # (and the incremental branch) reorder `mat` by missing-allele
+        # count but leave `names` in the original input order. `order`
+        # is positions in the *reordered* mat, so it has to be applied
+        # to the post-reorder label list. See issue #8, bug 3.
+        sorted_names = [ordered_names[i] for i in order]
 
+        # Render HC cells: values below LOCAL_OFFSET are real PubMLST STs
+        # and get written as-is; values at or above LOCAL_OFFSET are the
+        # synthetic ids we assign to `local_*` rows in prepare_mat_streaming,
+        # and get mapped back to their original "local_N" label via
+        # matid_to_name. See issue #8 bug D.
         out_path = f"{output_dir}/profile_{method}_linkage.HierCC.gz"
         with gzip.open(out_path, "wt") as fout:
             hc_cols = "\t".join("HC" + str(i) for i in np.arange(n_loci + 1))
             fout.write(f"#ST_id\t{hc_cols}\n")
             for n, r in zip(sorted_names, res):
-                fout.write("\t".join([str(n)] + [str(rr) for rr in r[1:]]) + "\n")
+                cells = []
+                for rr in r[1:]:
+                    iv = int(rr)
+                    if iv >= LOCAL_OFFSET:
+                        cells.append(matid_to_name.get(iv, str(iv)))
+                    else:
+                        cells.append(str(iv))
+                fout.write("\t".join([str(n)] + cells) + "\n")
         prep_index(out_path)
         logging.info(f"Saving clustering results to profile_{method}_linkage.HierCC.gz")
 

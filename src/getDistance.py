@@ -11,6 +11,7 @@ import math
 import multiprocessing as mp
 import os
 import queue
+import re
 import tempfile
 import time
 import traceback
@@ -19,6 +20,23 @@ from dataclasses import dataclass
 
 import numba as nb
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Synthetic-id scheme for `local_*` profiles.
+#
+# `local_*` STs need an integer id for the clustering math (mat[:,0] drives
+# `descendents[x][0]`, which scipy's linkage output indexes into). We use
+# `LOCAL_OFFSET + N` so that:
+#   1. `mat[:,0]` for any `local_N` is guaranteed larger than every real
+#      numeric ST in the file (verified at parse time), so in every merge
+#      `min(descendents[...])` stays on the numeric side -- i.e. a local
+#      identifier can never land in an HC cell of a numeric row.
+#   2. The offset is constant per run, so the write loop can reliably detect
+#      "this HC cell is a synthetic local id" by the `>= LOCAL_OFFSET` test
+#      and render it back to the original `local_N` string.
+# ---------------------------------------------------------------------------
+LOCAL_OFFSET = 1_000_000
+_LOCAL_RE = re.compile(r"^local_([0-9]+)$")
 
 try:
     from numba import cuda
@@ -575,12 +593,25 @@ def prepare_mat_streaming(profile_file: str):
     """
     Memory-efficient profile loader (two-pass, no pandas).
 
-    Matches prepare_mat() semantics: first row is header, columns
-    whose header starts with '#' are omitted (except column 0),
-    negative allele values become 0, rows with ST <= 0 are dropped
-    when IDs are numeric.
+    First row is a header; data columns whose header starts with '#' are
+    omitted (except column 0). Negative allele values become 0. Numeric
+    rows with ST <= 0 are dropped (legacy pHierCC filter). `local_*` rows
+    are always kept.
 
-    Returns (mat, names) where mat is int32 with ST-id in column 0.
+    Each data row's first column must be either:
+      * an integer (a real PubMLST/Enterobase ST id), or
+      * `local_<N>` (a user-contributed profile; internally renumbered to
+        `LOCAL_OFFSET + N` so it sorts above every real ST id and can never
+        pollute HC cells of numeric rows).
+
+    Any other value is a hard error: silently accepting a rogue non-integer
+    label (e.g. a stray header row repeated as data) previously caused the
+    whole file to flip to row-index mode, replacing every real ST id with
+    a synthetic position. See issue #8 bug A.
+
+    Returns (mat, names), where `mat` is int32 with the chosen id in
+    column 0 and `names` is the list of original string labels
+    (e.g. "42", "local_3") in input order.
     """
     with _open_text_auto(profile_file) as fh:
         try:
@@ -591,33 +622,48 @@ def prepare_mat_streaming(profile_file: str):
         keep_cols = [0] + [i for i, h in enumerate(header[1:], start=1) if not h.startswith("#")]
 
         raw_names: list[str] = []
-        st_ids: list[int] = []
-        numeric_ids = True
+        numeric_vals: list[int | None] = []
+        local_suffixes: list[int | None] = []
 
-        for line in fh:
+        for lineno, line in enumerate(fh, start=2):
             if not line.strip():
                 continue
             fields = _split_fields(line)
             st = fields[0]
             raw_names.append(st)
-            if numeric_ids:
-                try:
-                    st_ids.append(int(st))
-                except ValueError:
-                    numeric_ids = False
+            try:
+                numeric_vals.append(int(st))
+                local_suffixes.append(None)
+                continue
+            except ValueError:
+                pass
+            m = _LOCAL_RE.match(st)
+            if not m:
+                raise ValueError(
+                    f"Unrecognised ST id at line {lineno} of {profile_file}: {st!r}. "
+                    f"Expected an integer or 'local_<N>'."
+                )
+            numeric_vals.append(None)
+            local_suffixes.append(int(m.group(1)))
 
     n_total = len(raw_names)
     if n_total == 0:
         raise ValueError(f"No rows in profile: {profile_file}")
 
-    if numeric_ids:
-        keep_row = np.array([x > 0 for x in st_ids], dtype=bool)
-        n_rows = int(keep_row.sum())
-        names = [str(x) for x in np.array(st_ids, dtype=np.int64)[keep_row]]
-    else:
-        keep_row = np.ones(n_total, dtype=bool)
-        n_rows = n_total
-        names = raw_names
+    max_numeric = max((v for v in numeric_vals if v is not None), default=0)
+    if max_numeric >= LOCAL_OFFSET:
+        raise ValueError(
+            f"Numeric ST id {max_numeric} collides with LOCAL_OFFSET "
+            f"({LOCAL_OFFSET}). Raise LOCAL_OFFSET in src/getDistance.py."
+        )
+
+    # Drop numeric rows with ST <= 0. Local rows are always kept.
+    keep_row = np.array(
+        [(v > 0) if v is not None else True for v in numeric_vals],
+        dtype=bool,
+    )
+    n_rows = int(keep_row.sum())
+    names = [nm for nm, k in zip(raw_names, keep_row) if k]
 
     n_cols = len(keep_cols)
     mat = np.empty((n_rows, n_cols), dtype=np.int32)
@@ -634,10 +680,11 @@ def prepare_mat_streaming(profile_file: str):
                 continue
             fields = _split_fields(line)
 
-            if numeric_ids:
-                mat[dst_row, 0] = int(fields[0])
+            suf = local_suffixes[src_row]
+            if suf is not None:
+                mat[dst_row, 0] = LOCAL_OFFSET + suf
             else:
-                mat[dst_row, 0] = dst_row + 1
+                mat[dst_row, 0] = numeric_vals[src_row]
 
             for dst_col, src_col in enumerate(keep_cols[1:], start=1):
                 v = 0
