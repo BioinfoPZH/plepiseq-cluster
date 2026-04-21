@@ -302,6 +302,20 @@ read_profile() {
     fi
 }
 
+# Read just the first line of a (possibly gzipped) file. Drains the rest of
+# the stream into /dev/null so the upstream decompressor never receives
+# SIGPIPE -- which together with `set -euo pipefail` would otherwise abort
+# the whole script at the first header read.
+read_header_line() {
+    local path="$1"
+    if [[ "$path" == *.gz ]]; then
+        zcat "$path" | { IFS= read -r line; cat > /dev/null; printf '%s\n' "$line"; }
+    else
+        IFS= read -r line < "$path"
+        printf '%s\n' "$line"
+    fi
+}
+
 prepare_profile() {
     local species="$1"
     local species_dir="${output}/${species}"
@@ -315,7 +329,7 @@ prepare_profile() {
     fi
 
     local ext_header
-    ext_header=$(read_profile "$external_path" | head -n 1)
+    ext_header=$(read_header_line "$external_path")
     if [ -z "$ext_header" ]; then
         echo "ERROR: external profile for ${species} is empty (${external_path})"
         exit 1

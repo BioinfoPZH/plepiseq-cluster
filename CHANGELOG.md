@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.3.4] - 2026-04-21
+### Fixed
+- `tools/run_clustering.sh`: reading the external profile header via `zcat | head -n 1` under `set -euo pipefail` caused `zcat` to receive `SIGPIPE` on large inputs, which `pipefail` propagated and `set -e` turned into a silent abort inside the `$(…)` substitution (the script terminated at the first species). Replaced with a `read_header_line` helper that drains the remainder of the stream to `/dev/null`.
+
 ## [0.3.3] - 2026-04-18
 ### Added
 - `tools/run_clustering.sh`: three optional per-species local-profile flags (`--salmonella-local`, `--escherichia-local`, `--campylobacter-local`). Each accepts a tab-separated plain-text profile with a header matching the external download and rows whose first column matches `^local_[0-9]+$`.
