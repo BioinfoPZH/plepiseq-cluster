@@ -1,6 +1,22 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-21
+Critical data-correctness release: the handling of mixed numeric + `local_*`
+profiles introduced in 0.3.x silently corrupted both the `#ST_id` column and
+the HC clustering cells for every real-world input. Any `.HierCC.gz` produced
+by 0.3.2 through 0.3.4 must be regenerated. Pure-numeric, pre-sorted,
+uniform-missing profiles (the pHierCC upstream test shape) are byte-identical
+to 0.3.1.
+
+### Fixed
+- **Data-correctness regression (critical), bug B.** `src/pHierCC.py` write loop indexed into `names` (input order) instead of `ordered_names` (post-`_split_local` order) when applying the final `argsort` permutation. For any profile where `_split_local` actually reordered rows -- i.e. any real dataset whose rows don't all have the same number of missing alleles, including every production run that merges public STs with `local_*` STs -- this silently wrote the right HC clustering data under the wrong `#ST_id` label. Outputs from 0.3.2, 0.3.3 and 0.3.4 should be discarded and regenerated (run `tools/run_clustering.sh --clean` or delete `ordering.npy` to force a full recompute). Pure-numeric, pre-sorted, uniform-missing profiles were unaffected, which is why the bug escaped review in the 0.3.2 reproducer. See issue #8, bug 3.
+- **Data-correctness regression (critical), bug D.** `src/getDistance.py::prepare_mat_streaming` flipped the whole file into "synthetic row-position" mode whenever any single row failed `int()` (e.g. the first `local_*` row), replacing every real ST id in `mat[:,0]` with `1..N`. Downstream, HC cells of numeric rows then referenced row positions instead of real ST ids (e.g. `local_1` appeared as `83780` in Campylobacter, and renaming a `local_*` row to any non-existing integer id made HC0 values jump around arbitrarily). `prepare_mat_streaming` now keeps real numeric ids for numeric rows and assigns `LOCAL_OFFSET + N` (currently `1_000_000 + N`) to `local_N` rows; the pHierCC write loop renders any HC cell `>= LOCAL_OFFSET` back to its original `local_N` string via the `matid_to_name` map. Anything else in column 0 (e.g. a stray header row, empty id, or an unknown non-numeric token) is now a hard error instead of silently corrupting all ids.
+- `tools/run_clustering.sh`: `prepare_profile` replaced the positional `tail -n +2` strip with an `awk '$1 != hdr1'` filter on both the external and the local stream, and added a post-merge assertion that the final `profiles.list[.gz]` contains exactly one header row. A duplicate header row was observed in one Campylobacter run (Apr 2026) despite clean staged inputs; the origin could not be reliably reproduced (transient PubMLST response, mid-read overwrite, or a pre-`read_header_line` shell path are all plausible), so the merge is now tolerant of duplicate headers in either input and fails loudly if somehow more than one header slips through.
+
+### Added
+- `test_data/profiles_with_local_ids.list` and `test_data/profiles_with_local_ids_switched.list` -- a paired reproducer (the second file is the first with the `local_*` rows renamed to integer ids) used to confirm, after the fix, that the numeric block of the mixed run is byte-identical to the pure-numeric run and that `local_*` rows render as `local_N` strings throughout.
+
 ## [0.3.4] - 2026-04-21
 ### Fixed
 - `tools/run_clustering.sh`: reading the external profile header via `zcat | head -n 1` under `set -euo pipefail` caused `zcat` to receive `SIGPIPE` on large inputs, which `pipefail` propagated and `set -e` turned into a silent abort inside the `$(…)` substitution (the script terminated at the first species). Replaced with a `read_header_line` helper that drains the remainder of the stream to `/dev/null`.

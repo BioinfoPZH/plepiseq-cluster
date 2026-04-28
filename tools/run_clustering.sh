@@ -380,19 +380,48 @@ prepare_profile() {
     fi
 
     # Header + external rows (numeric-ascending) + local rows (local_N ascending)
+    #
+    # We do NOT trust either stream to contain exactly one header. Instead of
+    # `tail -n +2`, we filter by the first column: any row whose first cell
+    # equals the canonical header label (e.g. "cgST") is dropped. This defends
+    # against duplicate header rows in the download (observed on Campylobacter
+    # April 2026 -- origin never reproduced: likely a transient PubMLST
+    # response or a mid-read overwrite) and against future upstream mistakes.
+    # The canonical header is written exactly once, from `$ext_header`.
+    local hdr1="${ext_header%%$'\t'*}"
+
     printf '%s\n' "$ext_header" > "$tmp_body"
-    read_profile "$external_path" | tail -n +2 | sort -t$'\t' -k1,1n >> "$tmp_body"
+    read_profile "$external_path" \
+        | awk -v h="$hdr1" -F'\t' 'NR>1 && $1 != h' \
+        | sort -t$'\t' -k1,1n \
+        >> "$tmp_body"
 
     local n_ext n_loc=0
-    n_ext=$(($(read_profile "$external_path" | wc -l) - 1))
+    n_ext=$(read_profile "$external_path" \
+        | awk -v h="$hdr1" -F'\t' 'NR>1 && $1 != h' \
+        | wc -l)
 
     if [ -n "$local_src" ] && [ "$local_is_header_only" = false ]; then
         local local_path="${species_dir}/profiles_local.list"
-        tail -n +2 "$local_path" | sort -t_ -k2,2n >> "$tmp_body"
-        n_loc=$(($(wc -l < "$local_path") - 1))
+        awk -v h="$hdr1" -F'\t' 'NR>1 && $1 != h' "$local_path" \
+            | sort -t_ -k2,2n \
+            >> "$tmp_body"
+        n_loc=$(awk -v h="$hdr1" -F'\t' 'NR>1 && $1 != h' "$local_path" | wc -l)
     fi
 
     local n_total=$((n_ext + n_loc))
+
+    # Final safety net: the merged file must contain exactly one header row
+    # (first column equal to the canonical header label). Anything else is a
+    # bug upstream in this function; abort before clustering wastes hours on
+    # a corrupt profile.
+    local n_hdr
+    n_hdr=$(awk -v h="$hdr1" -F'\t' '$1 == h {c++} END {print c+0}' "$tmp_body")
+    if [ "$n_hdr" -ne 1 ]; then
+        echo "ERROR: merged ${species} profile contains ${n_hdr} header rows (expected 1)"
+        rm -f "$tmp_body"
+        exit 1
+    fi
 
     if [[ "$final_path" == *.gz ]]; then
         gzip -n -c "$tmp_body" > "$final_path"
